@@ -100,6 +100,76 @@ test('canvas handlers preserve manual layout, refuse stale revisions and rehydra
   expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
 });
 
+test('duplicated pages save, accept page-specific operations and reopen with their IDs intact', async ({ page, request, bridge }) => {
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  const read = async () => (await request.get(bridge.url + '/api/document', { headers })).json();
+  const firstPage = (xml: string) => topology(`<mxfile>${parse(diagramXml(xml)).getElementsByTagName('diagram')[0]}</mxfile>`);
+  await page.goto(bridge.url);
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  const initial = await read();
+  const editor = page.frameLocator('#editor');
+  await editor.locator('.geTab').filter({ hasText: 'Resource organisation' }).first().click({ button: 'right' });
+  await editor.getByText('Duplicate Page', { exact: true }).click();
+  await expect.poll(async () => parse((await read()).xml).getElementsByTagName('diagram').length, { timeout: 20_000 }).toBe(2);
+  await expect(page.locator('#status')).toContainText('Saved');
+  const duplicated = await read();
+  const copy = parse(duplicated.xml).getElementsByTagName('diagram')[1];
+  const cells = Array.from(copy.getElementsByTagName('mxCell'));
+  const root = cells.find(c => !c.hasAttribute('parent'))!;
+  const layer = cells.find(c => c.getAttribute('parent') === root.getAttribute('id'))!;
+  const component = cells.find(c => c.getAttribute('value') === 'Ingestion Function App')!;
+  expect(root.getAttribute('id')).not.toBe('0');
+  expect(layer.getAttribute('id')).not.toBe('1');
+  expect(firstPage(duplicated.xml)).toBe(firstPage(initial.xml));
+  const response = await request.post(bridge.url + '/api/operations', { headers, data: {
+    expectedRevision: duplicated.revision, pageId: copy.getAttribute('id'), operations: [
+      { kind: 'update', id: component.getAttribute('id'), label: 'API Gateway (AWS)' },
+      { kind: 'add', id: 'mcp', label: 'MCP', geometry: { x: 20, y: 20, width: 100, height: 60 } },
+    ],
+  } });
+  expect(response.status()).toBe(202);
+  const job = await response.json();
+  await expect.poll(async () => (await (await request.get(bridge.url + '/api/jobs/' + job.id, { headers })).json()).status,
+    { timeout: 30_000 }).toBe('completed');
+  const final = await read();
+  const finalCopy = parse(final.xml).getElementsByTagName('diagram')[1];
+  const added = Array.from(finalCopy.getElementsByTagName('mxCell')).find(c => c.getAttribute('id') === 'mcp')!;
+  expect(added.getAttribute('parent')).toBe(layer.getAttribute('id'));
+  expect(geometry(final.xml, component.getAttribute('id')!)).toBe(geometry(duplicated.xml, component.getAttribute('id')!));
+  expect(firstPage(final.xml)).toBe(firstPage(initial.xml));
+  expect(topology(diagramXml(readFileSync(bridge.filename, 'utf8')))).toBe(topology(final.xml));
+  const reopened = await bridge.restart();
+  await page.goto(reopened.url);
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  await editor.locator('.geTab').filter({ hasText: copy.getAttribute('name')! }).first().click();
+  await expect(editor.getByText('API Gateway (AWS)', { exact: true })).toBeVisible();
+  await expect(editor.getByText('MCP', { exact: true })).toBeVisible();
+});
+
+test('rejected manual drafts still warn before closing and can be saved after retry', async ({ page, request, bridge }) => {
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  await page.goto(bridge.url);
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  const savedSvg = readFileSync(bridge.filename, 'utf8');
+  await page.route('**/api/draft', route => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'Rejected test draft' }) }));
+  await dragFunction(page);
+  await expect(page.locator('#status')).toContainText('Rejected test draft');
+  const document = await (await request.get(bridge.url + '/api/document', { headers })).json();
+  expect(document.dirty).toBe(false);
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
+  const warns = () => page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(await warns()).toBe(true);
+  await page.unroute('**/api/draft');
+  await page.locator('#save').click();
+  await expect(page.locator('#status')).toContainText('Saved');
+  expect(await warns()).toBe(false);
+  expect(readFileSync(bridge.filename, 'utf8')).not.toBe(savedSvg);
+});
+
 test('manual drag → agent update → embedded SVG reopen, entirely local', async ({ page, request, bridge }) => {
   const external: string[] = [];
   page.on('request', req => { if (!req.url().startsWith(bridge.url) && !/^(data|blob):/.test(req.url())) external.push(req.url()); });

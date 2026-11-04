@@ -14,6 +14,28 @@ export function parse(source: string) {
   } catch { throw new BridgeError('Malformed XML'); }
 }
 
+function graphStructure(page: ReturnType<typeof parse>['documentElement']) {
+  const models = page.getElementsByTagName('mxGraphModel');
+  const roots = page.getElementsByTagName('root');
+  if (models.length !== 1 || roots.length !== 1 || roots[0].parentNode !== models[0]) throw new BridgeError('Missing graph root');
+  const root = roots[0];
+  const cells = Array.from(root.getElementsByTagName('mxCell'));
+  const idOf = (cell: typeof cells[number]) => cell.getAttribute('id') || cell.parentNode?.['getAttribute']?.('id');
+  const ids = new Set<string>();
+  for (const cell of cells) {
+    const id = idOf(cell);
+    if (!id || ids.has(id)) throw new BridgeError('Missing or duplicate cell identifier');
+    ids.add(id);
+  }
+  const graphRoots = cells.filter(cell => !cell.hasAttribute('parent'));
+  const isContainer = (cell: typeof cells[number]) => cell.getAttribute('vertex') !== '1' && cell.getAttribute('edge') !== '1';
+  if (graphRoots.length !== 1 || !isContainer(graphRoots[0])) throw new BridgeError('Missing graph root');
+  const rootId = idOf(graphRoots[0]);
+  const layers = cells.filter(cell => cell.getAttribute('parent') === rootId && isContainer(cell));
+  if (!layers.length) throw new BridgeError('Missing graph layer');
+  return { root, rootId, layerIds: layers.map(idOf) };
+}
+
 export function diagramXml(source: string) {
   let doc = parse(source);
   if (doc.documentElement.tagName === 'svg') {
@@ -39,13 +61,7 @@ export function diagramXml(source: string) {
         page.appendChild(doc.importNode(model, true));
       } catch { throw new BridgeError('Invalid compressed diagram'); }
     }
-    const ids = new Set<string>();
-    for (const cell of Array.from(page.getElementsByTagName('mxCell'))) {
-      const id = cell.getAttribute('id') || cell.parentNode?.['getAttribute']?.('id');
-      if (!id || ids.has(id)) throw new BridgeError('Missing or duplicate cell identifier');
-      ids.add(id);
-    }
-    if (!ids.has('0') || !ids.has('1')) throw new BridgeError('Missing graph root');
+    graphStructure(page);
   }
   doc.documentElement.setAttribute('compressed', 'false');
   return new XMLSerializer().serializeToString(doc);
@@ -108,11 +124,12 @@ export function applyOperations(source: string, operations: Operation[], relayou
   const pages = Array.from(doc.getElementsByTagName('diagram'));
   const page = pageId ? pages.find(p => p.getAttribute('id') === pageId) : pages[0];
   if (!page) throw new BridgeError('Page not found');
-  const root = page.getElementsByTagName('root')[0];
+  const { root, rootId, layerIds } = graphStructure(page);
+  const reserved = new Set([rootId, ...layerIds]);
   const find = (id: string) => Array.from(root.getElementsByTagName('mxCell')).find(c =>
     c.getAttribute('id') === id || c.parentNode?.['getAttribute']?.('id') === id);
   for (const op of operations) {
-    if (!op || !['add', 'update', 'remove'].includes(op.kind) || typeof op.id !== 'string' || !/^[\w.-]{1,100}$/.test(op.id) || ['0', '1'].includes(op.id)) {
+    if (!op || !['add', 'update', 'remove'].includes(op.kind) || typeof op.id !== 'string' || !/^[\w.-]{1,100}$/.test(op.id) || reserved.has(op.id)) {
       throw new BridgeError('Invalid operation or reserved cell identifier');
     }
     let cell = find(op.id);
@@ -120,7 +137,7 @@ export function applyOperations(source: string, operations: Operation[], relayou
       if (cell) throw new BridgeError(`Cell already exists: ${op.id}`);
       cell = doc.createElement('mxCell');
       cell.setAttribute('id', op.id);
-      cell.setAttribute('parent', op.parent ?? '1');
+      cell.setAttribute('parent', op.parent ?? layerIds[0]);
       if (op.source || op.target) {
         if (!op.source || !op.target || !find(op.source) || !find(op.target) || !op.relation || !Object.hasOwn(connectorStyles, op.relation) || !op.label) throw new BridgeError('Connections need endpoints, a label and a relation type');
         cell.setAttribute('edge', '1');

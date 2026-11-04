@@ -9,6 +9,7 @@ let chain = Promise.resolve();
 let pendingExport;
 let suppressAutosave = false;
 let stopped = false;
+let unsaved = false;
 
 async function api(path, body) {
   const response = await fetch('/api/' + path, {
@@ -43,6 +44,7 @@ async function recordDraft(xml) {
   state = await api('draft', { xml, expectedRevision: state.revision });
 }
 async function saveCurrent(xml) {
+  unsaved = true;
   block(true);
   suppressAutosave = true;
   try {
@@ -50,6 +52,7 @@ async function saveCurrent(xml) {
     await recordDraft(xml);
     const result = await exportDiagram('xmlsvg');
     state = await api('save', { svg: decodeSvg(result.data), expectedRevision: state.revision });
+    unsaved = false;
     report(`Saved · revision ${state.revision}`);
   } finally { suppressAutosave = false; block(false); }
 }
@@ -92,14 +95,18 @@ window.addEventListener('message', event => {
   if (message.event === 'export' && pendingExport) pendingExport.resolve(message);
   if (message.event === 'autosave' && !suppressAutosave) {
     const xml = message.xml;
+    unsaved = true;
     report('Saving manual edit…');
     enqueue(() => saveCurrent(xml));
   }
-  if (message.event === 'save') enqueue(() => saveCurrent(message.xml));
+  if (message.event === 'save') {
+    unsaved = true;
+    enqueue(() => saveCurrent(message.xml));
+  }
 });
 saveButton.addEventListener('click', () => enqueue(() => saveCurrent()));
 window.addEventListener('beforeunload', event => {
-  if (state?.dirty || !busy.hidden) { event.preventDefault(); event.returnValue = ''; }
+  if (unsaved || state?.dirty || !busy.hidden) { event.preventDefault(); event.returnValue = ''; }
 });
 async function poll() {
   while (!stopped) {

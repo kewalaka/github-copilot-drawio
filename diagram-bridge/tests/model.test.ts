@@ -72,6 +72,58 @@ test('strips help links and rejects active HTML and external styles in SVG expor
     expect(() => validateSvg(svg(xml).replace('<rect', content + '<rect'), xml)).toThrow();
   }
 });
+const ffModel = '<mxGraphModel><root><mxCell id="ff-0"/><mxCell id="ff-1" parent="ff-0"/><mxCell id="ff-2" parent="ff-0"/><mxCell id="aws" value="AWS Account" vertex="1" parent="ff-1"><mxGeometry x="20" y="30" width="400" height="200" as="geometry"/></mxCell></root></mxGraphModel>';
+const ffDrawing = () => seed().replace('</mxfile>', `<diagram id="ff" name="FF">${ffModel}</diagram></mxfile>`);
+
+test('accepts duplicated pages with prefixed graph root and layer IDs', () => {
+  const xml = diagramXml(ffDrawing());
+  expect(parse(xml).getElementsByTagName('diagram')).toHaveLength(2);
+  expect(xml).toContain('id="ff-0"');
+  expect(topology(validateSvg(svg(xml), xml))).toBe(topology(xml));
+  const compressed = deflateRawSync(encodeURIComponent(ffModel)).toString('base64');
+  expect(topology(`<mxfile><diagram id="ff" name="FF">${compressed}</diagram></mxfile>`))
+    .toBe(topology(`<mxfile><diagram id="ff" name="FF">${ffModel}</diagram></mxfile>`));
+});
+
+test('page-specific operations use the actual default layer and preserve other pages and layout', () => {
+  const before = ffDrawing();
+  const after = applyOperations(before, [
+    { kind: 'update', id: 'aws', label: 'AWS account boundary' },
+    { kind: 'add', id: 'gateway', label: 'API Gateway (AWS)', geometry: { x: 20, y: 40, width: 100, height: 60 } },
+    { kind: 'add', id: 'mcp', parent: 'aws', label: 'MCP', geometry: { x: 160, y: 40, width: 100, height: 60 } },
+  ], false, 'ff');
+  const pages = parse(after).getElementsByTagName('diagram');
+  expect(pages[0].toString()).toBe(parse(before).getElementsByTagName('diagram')[0].toString());
+  const cells = Array.from(pages[1].getElementsByTagName('mxCell'));
+  expect(cells.find(c => c.getAttribute('id') === 'gateway')!.getAttribute('parent')).toBe('ff-1');
+  expect(cells.find(c => c.getAttribute('id') === 'mcp')!.getAttribute('parent')).toBe('aws');
+  expect(cells.find(c => c.getAttribute('id') === 'aws')!.getElementsByTagName('mxGeometry')[0].toString())
+    .toBe(parse(before).getElementsByTagName('diagram')[1].getElementsByTagName('mxGeometry')[0].toString());
+});
+
+test('protects actual graph roots and every layer from agent operations', () => {
+  for (const id of ['ff-0', 'ff-1', 'ff-2']) {
+    for (const kind of ['add', 'update', 'remove'] as const) {
+      expect(() => applyOperations(ffDrawing(), [{ kind, id, label: 'Invalid' }], false, 'ff')).toThrow('reserved');
+    }
+  }
+  expect(() => applyOperations(seed(), [{ kind: 'update', id: '0', label: 'Invalid' }])).toThrow('reserved');
+  expect(() => applyOperations(seed(), [{ kind: 'remove', id: '1' }])).toThrow('reserved');
+});
+
+test('rejects absent, ambiguous or rendered graph roots and missing layers', () => {
+  for (const root of [
+    '', '<mxCell id="a"/><mxCell id="b"/>',
+    '<mxCell id="a" vertex="1"/><mxCell id="b" parent="a"/>',
+    '<mxCell id="a"/><mxCell id="b" parent="missing"/>',
+    '<mxCell id="a"/><mxCell id="b" parent="a" vertex="1"/>',
+  ]) {
+    expect(() => diagramXml(`<mxGraphModel><root>${root}</root></mxGraphModel>`)).toThrow('Missing graph');
+  }
+  expect(() => diagramXml('<mxGraphModel><root><mxCell id="a"/><mxCell id="a" parent="a"/></root></mxGraphModel>')).toThrow('duplicate');
+  expect(() => diagramXml('<mxGraphModel><mxCell id="0"/><mxCell id="1" parent="0"/></mxGraphModel>')).toThrow('Missing graph root');
+});
+
 test('rejects malformed XML, entities and image-only SVGs', () => {
   expect(() => diagramXml('<mxfile>')).toThrow('Malformed');
   expect(() => diagramXml('<!DOCTYPE x><mxfile/>')).toThrow();

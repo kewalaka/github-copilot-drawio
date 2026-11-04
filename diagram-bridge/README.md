@@ -71,7 +71,7 @@ Example input:
 
 Existing positions and parents cannot change unless the request explicitly includes `"relayout": true`. Do not set that flag without the user requesting rearrangement. Read the latest diagram before deciding placement; expand explicitly named focal components rather than all dependencies.
 
-The agent command retries stale revisions after re-reading. The editor briefly blocks input during export/save. The SVG is validated and atomically replaced only after successful rendering. Updates cannot silently overwrite a detected external file change; resolve it and restart. Unsaved drafts are kept in memory, not crash-recovery storage.
+The agent command retries stale revisions after re-reading. The editor briefly blocks input during export/save. The SVG is validated and atomically replaced only after successful rendering. Updates cannot silently overwrite a detected external file change; resolve it and restart. Unsaved drafts are kept in memory, not crash-recovery storage. If a save fails, keep the editor open and export XML with all pages before restarting; the bridge's saved state may not include the rejected edit.
 
 ## Privacy and limits
 
