@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Local architecture editor</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/config.js"></script><script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <strong>Architecture editor</strong>
+    <span class="badge">Local only</span>
+    <span id="status" role="status">Connecting…</span>
+    <button id="save" disabled>Save SVG</button>
+    <a id="preview" href="/diagram.svg" target="_blank" rel="noopener">SVG preview</a>
+  </header>
+  <main><iframe id="editor" title="draw.io architecture editor"></iframe><div id="busy" hidden>Saving diagram…</div></main>
+</body>
+</html>

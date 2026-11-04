@@ -1,0 +1,15 @@
+node_modules/
+vendor/
+artifacts/
+runtime.json
+runtime*.json
+last-bridge.json
+.env
+.env.*
+*.drawio
+*.drawio.svg
+*.drawio.png
+diagrams/
+playwright-report/
+test-results/
+.DS_Store

@@ -1,0 +1,6 @@
+node_modules/
+vendor/
+runtime.json
+playwright-report/
+test-results/
+diagrams/
