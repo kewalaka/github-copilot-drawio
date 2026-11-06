@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { deflateRawSync } from 'node:zlib';
-import { applyOperations, diagramXml, parse, topology, validateSvg } from '../model';
+import { applyOperations, diagramXml, documentContent, parse, topology, validateSvg } from '../model';
 import { seed } from '../seed';
 const escape = (s: string) => s.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
 const svg = (xml: string) => `<svg xmlns="http://www.w3.org/2000/svg" content="${escape(xml)}"><rect width="100" height="100"/></svg>`;
@@ -17,6 +17,38 @@ test('label updates preserve all geometry', () => {
   const geometry = (xml: string) => Array.from(parse(xml).getElementsByTagName('mxGeometry'), g => g.toString());
   expect(geometry(after)).toEqual(geometry(before));
 });
+test('document comparison ignores serialisation whitespace but protects metadata, layout and cell order', () => {
+  const xml = seed();
+  const formatted = xml.replaceAll('><', '>\n  <').replace('id="architecture" name="Resource organisation"', 'name="Resource organisation" id="architecture"');
+  expect(documentContent(formatted)).toBe(documentContent(xml));
+  expect(documentContent(xml.replace('page="0"', 'page="1"'))).not.toBe(documentContent(xml));
+  expect(documentContent(applyOperations(xml, [{ kind: 'update', id: 'function', label: 'Manual change' }]))).not.toBe(documentContent(xml));
+  expect(documentContent(applyOperations(xml, [{ kind: 'update', id: 'function', geometry: { x: 1, y: 2, width: 64, height: 64 } }], true))).not.toBe(documentContent(xml));
+  const reordered = parse(xml);
+  const cell = Array.from(reordered.getElementsByTagName('mxCell')).find(cell => cell.getAttribute('id') === 'function')!;
+  cell.parentNode!.appendChild(cell);
+  expect(topology(reordered.toString())).toBe(topology(xml));
+  expect(documentContent(reordered.toString())).not.toBe(documentContent(xml));
+});
+
+test('connection updates preserve user-defined waypoints', () => {
+  const doc = parse(seed());
+  const edge = Array.from(doc.getElementsByTagName('mxCell')).find(cell => cell.getAttribute('id') === 'pe-association')!;
+  const geometry = edge.getElementsByTagName('mxGeometry')[0];
+  const points = doc.createElement('Array');
+  points.setAttribute('as', 'points');
+  for (const [x, y] of [[480, 180], [640, 260]]) {
+    const point = doc.createElement('mxPoint');
+    point.setAttribute('x', String(x));
+    point.setAttribute('y', String(y));
+    points.appendChild(point);
+  }
+  geometry.appendChild(points);
+  const updated = applyOperations(doc.toString(), [{ kind: 'update', id: 'pe-association', label: 'Updated connection', relation: 'network' }]);
+  const result = Array.from(parse(updated).getElementsByTagName('mxCell')).find(cell => cell.getAttribute('id') === 'pe-association')!;
+  expect(result.getElementsByTagName('mxGeometry')[0].toString()).toBe(geometry.toString());
+});
+
 test('existing geometry and reparenting require explicit relayout', () => {
   expect(() => applyOperations(seed(), [{ kind: 'update', id: 'function', geometry: { x: 10, y: 10, width: 66, height: 66 } }])).toThrow('explicit relayout');
   expect(() => applyOperations(seed(), [{ kind: 'update', id: 'function', parent: 'rg-core' }])).toThrow('explicit relayout');

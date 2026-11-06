@@ -1,10 +1,13 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve, dirname, extname, relative } from 'node:path';
-import { applyOperations, BridgeError, diagramXml, validateSvg, type Operation } from './model';
-import { seed } from './seed';
+import { applyOperations, BridgeError, diagramXml, documentContent, validateSvg, type Operation } from './model';
+import { emptyDrawing } from './empty';
+import { createShapeSearch } from './shapes';
 
 const root = import.meta.dir;
+const assets = resolve(process.env.DRAWIO_ASSETS ?? (existsSync(`${root}/vendor/drawio/index.html`) ? `${root}/vendor/drawio` : `${root}/../artifacts/vendor/drawio`));
+const searchShapes = createShapeSearch(assets);
 const filename = resolve(process.env.DIAGRAM_FILE ?? `${root}/diagrams/architecture.drawio.svg`);
 if (!filename.endsWith('.drawio.svg')) throw new Error('DIAGRAM_FILE must end in .drawio.svg');
 mkdirSync(dirname(filename), { recursive: true });
@@ -13,7 +16,7 @@ const hash = (data: string) => createHash('sha256').update(data).digest('hex');
 const diskHash = () => existsSync(filename) ? hash(readFileSync(filename, 'utf8')) : null;
 let persistedHash = diskHash();
 const initialSvg = persistedHash ? readFileSync(filename, 'utf8') : null;
-let xml = initialSvg ? diagramXml(initialSvg) : seed();
+let xml = initialSvg ? diagramXml(initialSvg) : emptyDrawing();
 if (initialSvg) validateSvg(initialSvg, xml);
 let revision = 0;
 let savedRevision = persistedHash ? 0 : -1;
@@ -68,6 +71,10 @@ const server = Bun.serve({
         if (origin && origin !== url.origin) throw new BridgeError('Invalid origin', 403);
         if (request.method === 'GET') {
           if (url.pathname === '/api/document') { checkDisk(); return json(documentState()); }
+          if (url.pathname === '/api/shapes') {
+            if (Array.from(url.searchParams.keys()).some(key => !['query', 'limit'].includes(key)) || url.searchParams.getAll('query').length > 1 || url.searchParams.getAll('limit').length > 1) throw new BridgeError('Unknown or repeated shape search parameter');
+            return json(searchShapes({ query: url.searchParams.get('query') ?? '', ...(url.searchParams.has('limit') ? { limit: Number(url.searchParams.get('limit')) } : {}) }));
+          }
           if (url.pathname === '/api/jobs') {
             const id = url.searchParams.get('editorId');
             editorRequest({ editorId: id });
@@ -103,7 +110,7 @@ const server = Bun.serve({
           if (lock) throw new BridgeError('An update is being saved', 409);
           checkRevision(body.expectedRevision);
           const nextXml = diagramXml(body.xml);
-          if (nextXml !== xml) { xml = nextXml; revision++; }
+          if (nextXml !== xml && documentContent(nextXml) !== documentContent(xml)) { xml = nextXml; revision++; }
           return json(documentState());
         }
         if (url.pathname === '/api/save') {
@@ -151,7 +158,7 @@ const server = Bun.serve({
         file = filename;
       } else {
         const editorAsset = url.pathname.startsWith('/drawio/');
-        const directory = editorAsset ? `${root}/vendor/drawio` : `${root}/public`;
+        const directory = editorAsset ? assets : `${root}/public`;
         const pathname = decodeURIComponent(editorAsset ? url.pathname.slice(8) : url.pathname.slice(1)) || 'index.html';
         file = resolve(directory, pathname);
         if (relative(directory, file).startsWith('..') || pathname.startsWith('WEB-INF/') || pathname.startsWith('META-INF/')) throw new BridgeError('Invalid asset path', 403);

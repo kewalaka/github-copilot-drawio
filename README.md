@@ -1,42 +1,48 @@
 # Draw.io Copilot canvas
 
-Edit one local `.drawio.svg` in GitHub Copilot with revision-checked agent changes and protected manual layout. The bridge serves the editor locally; the user-installed extension connects Copilot to it.
+Edit local `.drawio.svg` files in GitHub Copilot, with separate drawings per session, revision-checked agent changes and protected manual layout. Includes general draw.io guidance, local shape search and save-confirmed drawing stages.
 
-## Start and install
+## Install
 
-Requires Bun, GitHub Copilot with canvas extensions, and local draw.io assets.
+Requires Bun and a Copilot host supporting SDK canvas extensions. Save open drawings before replacing an installed extension. From this checkout:
 
-1. Clone this private repository and follow [bridge setup](diagram-bridge/README.md#run) to download the pinned editor assets.
-2. Start the bridge:
+1. Download the pinned draw.io assets using [bridge setup](diagram-bridge/README.md#local-assets).
+2. Install dependencies and the complete user extension:
 
    ```sh
-   cd diagram-bridge
-   bun install --frozen-lockfile
-   bun run start
+   bun install --cwd diagram-bridge --frozen-lockfile
+   bun run drawio-canvas/install.ts
    ```
 
-   To keep a drawing elsewhere, set `DIAGRAM_FILE` to its absolute `.drawio.svg` path. Set `BRIDGE_RUNTIME` to choose the private runtime JSON location.
-3. Ask Copilot to install the user extension from `https://github.com/kewalaka/ghcp-canvas-drawio/tree/main/drawio-canvas`.
-4. Close any other editor for this drawing and wait 15 seconds for its lease to expire. Open `drawio-architecture` once with `runtimeFile` set to the bridge's absolute runtime JSON path. Never paste that file's contents into chat.
+   The installer copies the wrapper, skill, bridge and matched assets into `$COPILOT_HOME/extensions/drawio-canvas` (`COPILOT_HOME` defaults to `~/.copilot`). It preserves existing artifacts and session drawings. A wrapper-only folder/gist installation is incomplete.
+3. Reload extensions through your host's supported extension-management action, or restart Copilot after saving if no reload action is available. Do not reload after an installer failure.
+4. Ask Copilot to open `drawio-architecture`, without input. The extension starts or reuses this session's loopback bridge automatically.
 
-## Reopen and edit
+## Drawing storage
 
-Later opens need no input, including fresh panels and extension restarts. The extension remembers only the runtime path and drawing identity in `$COPILOT_HOME/extensions/drawio-canvas/artifacts/last-bridge.json` (`COPILOT_HOME` defaults to `~/.copilot`). It rereads credentials and the loopback URL from the private runtime file. Start the bridge separately and reopen after restarting it.
+Default opens create or reopen `$COPILOT_HOME/session-state/<sessionId>/files/diagram-bridge/architecture.drawio.svg`. A new session starts empty; new panels and provider restarts retain that session's drawing. Closing a panel does not delete the file. No remembered global drawing selection is used.
 
-To select another drawing or repair a stale selection, supply `runtimeFile` explicitly. Delete `last-bridge.json` to forget the selection. A changed drawing identity is rejected on default opens rather than silently switching files.
+For an explicitly shared drawing, [start a separate bridge](diagram-bridge/README.md#standalone-bridge) and supply its absolute private runtime JSON path as `runtimeFile`. This does not change other sessions' defaults. One editor owns each drawing at a time; close a previous editor and allow 15 seconds for its lease to expire.
 
-Read with `read_document` before `apply_operations`, passing the returned revision as `expectedRevision`. Existing positions and parents stay protected unless the user explicitly requests `relayout: true`. See [operation guidance](diagram-bridge/README.md#agent-changes).
+The SVG embeds editable XML and rendered images. Browser export's “Download” option is a browser delivery method, not a guaranteed filesystem destination in the host app. Use the bridge's saved SVG for a known local file.
 
-Runtime files, user preferences, drawings and downloaded assets are ignored by Git. Diagram content returned to Copilot is processed remotely; credentials stay local. Keep the supplied [MIT attribution](drawio-canvas/LICENSE) and draw.io's license notices.
+## Agent workflow
+
+The extension announces `drawio_get_guidance` through session context; its tool reads the bundled [general skill](drawio-canvas/skills/drawio/SKILL.md). No separate skill path or remote MCP server is needed.
+
+- `search_shapes` returns exact local styles and size hints, plus the editor version and asset fingerprint. It indexes general palette templates and local SVG libraries, not every stencil/palette shape. No online fallback is used.
+- `read_document` supplies the current revision, page IDs and existing layout.
+- `apply_operations` waits for rendering and the saved SVG. Build complex requests in meaningful stages, awaiting and checking each save before the next. Completed stages remain saved if a later stage fails. Reread and reassess conflicts or uncertain timeout outcomes; never blindly replay.
+
+Existing positions, parents and user-defined waypoints remain protected. Do not request `relayout: true` without the user's permission. Guidance covers mechanics, not organisation-specific drawing conventions.
 
 ## Validate
 
-From the repository root, after installing bridge dependencies:
-
 ```sh
-bun test drawio-canvas.test.ts diagram-bridge/tests/model.test.ts
-cd diagram-bridge
-bun run test:browser
+bun test drawio-canvas.test.ts drawio-canvas/*.test.ts diagram-bridge/tests/model.test.ts diagram-bridge/tests/shapes.test.ts
+bun run --cwd diagram-bridge test:browser
 ```
 
-Browser tests require the local editor assets and Playwright Chromium (`bunx playwright install chromium` if missing). Tests use disposable bridges, drawings and preference directories, not the live editor.
+Browser tests require the local assets and Playwright Chromium (`bunx playwright install chromium` if missing). Tests use disposable bridges, drawings and installation homes.
+
+Runtime credentials, drawings and downloaded assets are ignored by Git. Diagram content returned to Copilot is processed remotely; credentials stay local. Retain the supplied [MIT attribution](drawio-canvas/LICENSE) and draw.io's asset/license notices.

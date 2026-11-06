@@ -5,12 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diagramXml, parse, topology } from '../model';
 import { canvasOptions } from '../../drawio-canvas/canvas.mjs';
+import { seed } from '../seed';
 
 type Runtime = { url: string; token: string; filename: string };
 const test = base.extend<{ bridge: Runtime & { restart: () => Promise<Runtime>; runtimePath: string; temp: string } }>({
   bridge: async ({}, use) => {
     const temp = mkdtempSync(join(tmpdir(), 'diagram-bridge-test-'));
     const runtimePath = join(temp, 'runtime.json');
+    writeFileSync(join(temp, 'test.drawio.svg'), `<svg xmlns="http://www.w3.org/2000/svg" content="${seed().replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')}"></svg>`);
     let child: ReturnType<typeof spawn>;
     async function stop() {
       if (!child || child.exitCode !== null || child.signalCode !== null) return;
@@ -62,7 +64,8 @@ test('canvas handlers preserve manual layout, refuse stale revisions and rehydra
   class CanvasError extends Error {
     constructor(public code: string, message: string) { super(message); }
   }
-  const options = canvasOptions(CanvasError, { preferencesDir: join(bridge.temp, 'preferences') });
+  const bridges = { runtimeFile: async () => bridge.runtimePath };
+  const options = canvasOptions(CanvasError, { bridges });
   const panel = { instanceId: 'drawio-test', input: { runtimeFile: bridge.runtimePath } };
   const action = (name: string) => options.actions.find(item => item.name === name)!.handler;
   const read = () => action('read_document')({ instanceId: panel.instanceId, input: {} });
@@ -92,7 +95,7 @@ test('canvas handlers preserve manual layout, refuse stale revisions and rehydra
   const savedSvg = readFileSync(bridge.filename, 'utf8');
   expect(topology(diagramXml(savedSvg))).toBe(topology(updated.xml));
   await bridge.restart();
-  const rehydrated = canvasOptions(CanvasError, { preferencesDir: join(bridge.temp, 'preferences') });
+  const rehydrated = canvasOptions(CanvasError, { bridges });
   const freshPanel = { instanceId: 'new-panel', input: undefined };
   await page.goto((await rehydrated.open(freshPanel)).url);
   await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
@@ -297,4 +300,85 @@ test('agent command retries an intervening manual edit without losing its layout
       await exited;
     }
   }
+});
+
+test('local shape lookup supports progressive saved stages; later conflicts/failures preserve layout and completed work', async ({ page, request, bridge }) => {
+  class CanvasError extends Error {
+    constructor(public code: string, message: string) { super(message); }
+  }
+  const options = canvasOptions(CanvasError, { bridges: { runtimeFile: async () => bridge.runtimePath } });
+  const panel = { sessionId: 'progressive-test', instanceId: 'progressive-panel' };
+  const invoke = (name: string, input = {}) => options.actions.find(action => action.name === name)!.handler({ ...panel, input });
+  const read = () => invoke('read_document');
+  const opened = await options.open({ ...panel, input: undefined });
+  const external: string[] = [];
+  const localUrls = [bridge.url];
+  page.on('request', request => {
+    if (!localUrls.some(url => request.url().startsWith(url + '/')) && !/^(data|blob):/.test(request.url())) external.push(request.url());
+  });
+  await page.goto(opened.url);
+  await expect(page.locator('#save')).toBeEnabled({ timeout: 30_000 });
+  const firstSave = page.waitForResponse(response => response.url().endsWith('/api/save') && response.ok());
+  await page.locator('#save').click();
+  await firstSave;
+  await expect(page.locator('#status')).toContainText('Saved');
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  expect((await request.get(bridge.url + '/api/shapes?query=rectangle')).status()).toBe(401);
+  for (const query of ['query=rectangle&limit=51', 'query=rectangle&remote=true', 'query=rectangle&query=cloud']) {
+    expect((await request.get(bridge.url + '/api/shapes?' + query, { headers })).status()).toBe(400);
+  }
+  const seeded = await read();
+  await dragFunction(page);
+  await expect.poll(async () => geometry((await read()).xml, 'function')).not.toBe(geometry(seeded.xml, 'function'));
+  await expect.poll(async () => !(await read()).dirty).toBeTruthy();
+  const initial = await read();
+  const pageId = parse(initial.xml).getElementsByTagName('diagram')[0].getAttribute('id');
+  const rectangle = (await invoke('search_shapes', { query: 'rectangle', limit: 1 })).shapes[0];
+  const icons = await invoke('search_shapes', { query: 'ai foundry', limit: 1 });
+  const icon = icons.shapes[0];
+  expect(icons.editorVersion).toBe('32.6.9');
+  expect(icon.asset).toContain('/drawio/img/lib/');
+  expect((await request.get(bridge.url + icon.asset)).status()).toBe(200);
+  const stages = [
+    [{ kind: 'add', id: 'stage-boundary', label: 'System boundary', style: rectangle.style, geometry: { x: 1500, y: 100, width: 500, height: 400 } }],
+    [
+      { kind: 'add', id: 'stage-resource', parent: 'stage-boundary', label: 'Platform', style: rectangle.style, geometry: { x: 30, y: 70, width: 220, height: 270 } },
+      { kind: 'add', id: 'stage-consumer', parent: 'stage-boundary', label: 'Consumer', style: rectangle.style, geometry: { x: 300, y: 110, width: 150, height: 80 } },
+    ],
+    [{ kind: 'add', id: 'stage-content', parent: 'stage-resource', label: 'Local icon', style: icon.style, geometry: { x: 40, y: 60, width: icon.width, height: icon.height } }],
+    [{ kind: 'add', id: 'stage-link', source: 'stage-content', target: 'stage-consumer', label: 'Service calls', relation: 'data' }],
+  ];
+  let firstStageRevision: number | undefined;
+  for (const operations of stages) {
+    const before = await read();
+    const saved = await invoke('apply_operations', { expectedRevision: before.revision, pageId, operations });
+    const current = await read();
+    firstStageRevision ??= saved.revision;
+    expect(saved.revision).toBe(before.revision + 1);
+    expect(current).toMatchObject({ dirty: false, revision: saved.revision, savedRevision: saved.revision });
+    expect(topology(diagramXml(readFileSync(bridge.filename, 'utf8')))).toBe(topology(current.xml));
+    expect(geometry(current.xml, 'function')).toBe(geometry(initial.xml, 'function'));
+    for (const operation of operations) await expect(page.frameLocator('#editor').getByText(operation.label, { exact: true }).filter({ visible: true }).first()).toBeVisible();
+  }
+  const completed = await read();
+  const savedSvg = readFileSync(bridge.filename, 'utf8');
+  expect(savedSvg).toContain('data:image/svg+xml');
+  await expect(invoke('apply_operations', { expectedRevision: firstStageRevision!, pageId, operations: [{ kind: 'update', id: 'stage-content', label: 'Stale change' }] })).rejects.toMatchObject({ code: 'drawio_conflict' });
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
+  await page.route('**/api/commit', route => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'Later stage rejected in test' }) }));
+  await expect(invoke('apply_operations', { expectedRevision: completed.revision, pageId, operations: [{ kind: 'update', id: 'stage-content', label: 'Uncommitted change' }] })).rejects.toMatchObject({ code: 'drawio_update_failed' });
+  await page.unroute('**/api/commit');
+  const afterFailure = await read();
+  expect(afterFailure).toMatchObject({ dirty: false, revision: completed.revision, savedRevision: completed.revision });
+  expect(topology(afterFailure.xml)).toBe(topology(completed.xml));
+  expect(geometry(afterFailure.xml, 'stage-boundary')).toBe(geometry(completed.xml, 'stage-boundary'));
+  expect(geometry(afterFailure.xml, 'stage-resource')).toBe(geometry(completed.xml, 'stage-resource'));
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
+  localUrls.push((await bridge.restart()).url);
+  await page.goto((await options.open({ ...panel, input: undefined })).url);
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  await expect(page.frameLocator('#editor').getByText('Local icon', { exact: true }).filter({ visible: true }).first()).toBeVisible();
+  await expect(page.frameLocator('#editor').getByText('Service calls', { exact: true }).filter({ visible: true }).first()).toBeVisible();
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
+  expect(external).toEqual([]);
 });

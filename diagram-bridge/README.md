@@ -1,10 +1,10 @@
-# Local architecture editor bridge
+# Local draw.io bridge
 
-A local draw.io editor bridge with a verified user-installed Copilot canvas wrapper. Use Copilot chat to request changes; the bridge has no separate chat or model service.
+Serves the editor, authenticated document/shape APIs and revision-checked SVG saves. The installed canvas normally starts one bridge per session; a standalone bridge is optional for explicitly shared drawings.
 
-## Run
+## Local assets
 
-Requires Bun and the local draw.io 32.6.9 web assets in `vendor/drawio/`. From this directory, download them before starting or running browser tests:
+From this directory, download the pinned draw.io **32.6.9** web assets before installation or browser tests:
 
 ```sh
 mkdir -p vendor
@@ -13,79 +13,38 @@ unzip -q vendor/draw.war -d vendor/drawio
 rm vendor/draw.war
 ```
 
-Retain draw.io's supplied license notices. Assets are intentionally not included in this repository.
+Assets are intentionally not committed. Retain their license notices; artwork and stencils can have separate terms from application code. The source is draw.io tag `v32.6.9` (commit `3e707fd20b6930778d6f6bf6e4d0079b4bce366b`).
+
+`DRAWIO_ASSETS` can select another local asset directory. Shape lookup uses that same directory served at `/drawio/`, rejects a different editor version, and fingerprints its palette/image contents. It extracts literal general palette templates and local SVG libraries without executing palette code or following symlinks. Coverage is deliberately smaller than the full stencil catalog. There is no online icon fallback or copied upstream MCP index.
+
+## Standalone bridge
 
 ```sh
-bun install
-bun run start
+bun install --frozen-lockfile
+DIAGRAM_FILE="$PWD/diagrams/design.drawio.svg" BRIDGE_RUNTIME="$PWD/runtime.json" bun run start
 ```
 
-Open the loopback URL printed at startup. Manual edits auto-save to `diagrams/architecture.drawio.svg`. The SVG contains both the rendered image, embedded Azure icons and the editable draw.io XML. There is no second source file.
+Open the printed loopback URL, or pass the absolute runtime JSON path as the canvas's `runtimeFile`. Keep runtime contents private. An existing editable SVG is reopened; a missing drawing starts empty and is saved by the editor. Manual edits auto-save. Stop a terminal-run bridge with Ctrl+C.
 
-Choose a persistent file outside the checkout when needed:
+Only one editor owns each drawing. Close any other editor and wait 15 seconds for its lease to expire. The SVG stores the rendered preview, embedded images and editable XML for all pages; there is no separate XML source file.
+
+## Operations and persistence
+
+Use the [general skill](../drawio-canvas/skills/drawio/SKILL.md) and canvas actions for interactive drawing. `apply_operations` accepts `expectedRevision`, optional `pageId`, `operations`, and user-approved `relayout`. New nodes need stable IDs and geometry; connectors need endpoints, a label and `relationship`, `network` or `data`. Remove connections/children before parents. Page root/layer IDs are discovered structurally, not assumed to be `0`/`1`.
+
+Each batch queues an editor job, renders an editable SVG, validates it and atomically saves it before reporting completion. Use meaningful stages and reassess conflicts before continuing. Earlier saved stages remain intact on later failures. Existing positions, parents and user-defined waypoints are preserved without authorised layout changes. XML whitespace and attribute order do not count as edits; page settings, cell order and geometry still do.
+
+External disk changes are detected, not silently overwritten. Unsaved drafts are in memory, not crash-recovery storage. Keep the editor open if a manual save fails; the saved SVG may not contain the rejected draft. Browser “Download” depends on host delivery and is not a reliable local backup path.
+
+The diagnostic CLI `bun run agent.ts` reads the selected runtime's document. Its file-based write mode retries stale revisions automatically; prefer canvas actions when changes require interactive reassessment.
+
+## Privacy and validation
+
+The server binds to `127.0.0.1`, serves assets locally and blocks external browser requests. Saved SVGs embed images and reject active content/external asset references. Diagram content returned to Copilot is still processed remotely.
 
 ```sh
-DIAGRAM_FILE=/absolute/path/design.drawio.svg bun run start
+bun test tests/model.test.ts tests/shapes.test.ts
+bun run test:browser
 ```
 
-An existing embedded-XML SVG is reopened. Only one browser editor owns a file at a time. Runtime credentials in `runtime.json` are private; do not share that file. Stop the server with Ctrl+C when running it in a terminal.
-
-The initial diagram is an illustrative Azure integration design, not an Azure resource discovery result. It distinguishes resource-group ownership from subnet placement, and resource relationships from network and application/data flows. Labels state intentionally omitted networking details.
-
-## Copilot canvas
-
-Install the `drawio-canvas` user extension as described in the [repository README](../README.md#start-and-install). Start the bridge, then open `drawio-architecture` once with `runtimeFile` set to the absolute path of its private runtime JSON. Subsequent opens can omit input. Close any previous editor for the same diagram and wait 15 seconds for its lease to expire.
-
-Use the canvas's `read_document` action before `apply_operations`, passing the revision just read as `expectedRevision`. The wrapper waits for a saved SVG and reports stale revisions without blindly retrying. Reopen the canvas after a bridge restart to load its new URL. The extension is installed persistently; the bridge must still be started separately.
-
-## Agent changes
-
-The command-line interface remains available. Read the current document and stable component IDs:
-
-```sh
-bun run agent.ts
-```
-
-Put requested operations in a temporary JSON file, then apply them:
-
-```sh
-bun run agent.ts /absolute/path/operations.json
-```
-
-Example input:
-
-```json
-{
-  "operations": [
-    { "kind": "update", "id": "function", "label": "Event ingestion processor" },
-    {
-      "kind": "add", "id": "monitor", "parent": "rg-app",
-      "label": "Application Insights",
-      "geometry": { "x": 620, "y": 82, "width": 120, "height": 70 }
-    }
-  ]
-}
-```
-
-`add`, `update` and `remove` operate on stable IDs. New nodes need geometry. New connectors need `source`, `target`, a `label` and a `relation`: `relationship`, `network` or `data`. Remove connections and children before their parent. `pageId` selects a page; otherwise the first is used.
-
-Existing positions and parents cannot change unless the request explicitly includes `"relayout": true`. Do not set that flag without the user requesting rearrangement. Read the latest diagram before deciding placement; expand explicitly named focal components rather than all dependencies.
-
-The agent command retries stale revisions after re-reading. The editor briefly blocks input during export/save. The SVG is validated and atomically replaced only after successful rendering. Updates cannot silently overwrite a detected external file change; resolve it and restart. Unsaved drafts are kept in memory, not crash-recovery storage. If a save fails, keep the editor open and export XML with all pages before restarting; the bridge's saved state may not include the rejected edit.
-
-## Privacy and limits
-
-The server binds only to `127.0.0.1`. Editor assets are local; browser policy blocks external asset and API requests. SVG images are embedded and external links are disabled on save. Export uses the browser, not a remote export server. Copilot’s own agent processing is still remote.
-
-This is a single-user bridge, not simultaneous collaboration. The SVG’s visual preview uses the current page; editable XML retains all pages. Native canvas discovery, opening, revision-checked saves and input validation were verified using the installed wrapper.
-
-## Validate
-
-```sh
-bun test tests/model.test.ts
-bunx playwright test
-```
-
-Browser tests run isolated servers and disposable diagrams. They exercise real dragging, agent changes, embedded SVG reopen, conflicts and local-only requests.
-
-Downloaded assets, runtime credentials and generated diagrams are ignored by Git.
+Tests use isolated servers and disposable drawings. Runtime credentials, drawings and downloaded assets are ignored by Git.
