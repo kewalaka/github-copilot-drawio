@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readRuntime, request, BridgeError } from "./bridge.mjs";
+import { readReleaseVersion } from "./version.mjs";
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const repairInstallation = "Install this repository's complete drawio-canvas folder using Copilot's Install extension from repository action, then restart Copilot after saving open drawings.";
@@ -23,12 +24,13 @@ async function verifyDocument(runtime, filename) {
 export class SessionBridges {
   constructor({ home = process.env.COPILOT_HOME || join(homedir(), ".copilot"),
     runtimePath = join(extensionDir, "runtime.mjs"), assetsDir = join(extensionDir, "artifacts", "vendor", "drawio"),
-    sourceAssets = process.env.DRAWIO_ASSETS, loadRuntime } = {}) {
+    sourceAssets = process.env.DRAWIO_ASSETS, versionPath = join(extensionDir, "version.txt"), loadRuntime } = {}) {
     this.home = home;
     this.runtimePath = runtimePath;
     this.assetsDir = assetsDir;
     this.sourceAssets = sourceAssets;
     this.loadRuntime = loadRuntime;
+    this.versionPath = versionPath;
     this.sessions = new Map();
     this.services = new Map();
     this.stopping = false;
@@ -107,7 +109,7 @@ export class SessionBridges {
     }
     let service;
     try {
-      service = await runtime.startBridge({ filename, runtimeFile, assets, port: 0 });
+      service = await runtime.startBridge({ filename, runtimeFile, assets, port: 0, version: readReleaseVersion(this.versionPath) });
       if (typeof service?.close !== "function") throw new Error();
       const config = readRuntime(runtimeFile);
       if (config.url !== service.url) throw new Error();

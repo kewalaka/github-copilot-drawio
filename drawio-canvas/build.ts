@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const inputs = ['drawio-canvas/build.ts', 'drawio-canvas/runtime-entry.ts', 'drawio-canvas/install-assets.ts', 'diagram-bridge/server.ts', 'diagram-bridge/model.ts', 'diagram-bridge/empty.ts', 'diagram-bridge/shapes.ts', 'diagram-bridge/desktop.ts', 'diagram-bridge/public/index.html', 'diagram-bridge/public/style.css', 'diagram-bridge/public/app.js', 'diagram-bridge/package.json', 'diagram-bridge/bun.lock', 'drawio-canvas/THIRD_PARTY_NOTICES.txt'];
+const inputs = ['drawio-canvas/build.ts', 'drawio-canvas/runtime-entry.ts', 'drawio-canvas/install-assets.ts', 'diagram-bridge/server.ts', 'diagram-bridge/updates.ts', 'diagram-bridge/model.ts', 'diagram-bridge/empty.ts', 'diagram-bridge/shapes.ts', 'diagram-bridge/desktop.ts', 'diagram-bridge/public/index.html', 'diagram-bridge/public/style.css', 'diagram-bridge/public/app.js', 'diagram-bridge/package.json', 'diagram-bridge/bun.lock', 'drawio-canvas/THIRD_PARTY_NOTICES.txt'];
 const sha256 = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
 
 export async function buildRuntime({ write = false } = {}) {

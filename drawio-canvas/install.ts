@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 const source = import.meta.dir;
 const bridge = resolve(source, '../diagram-bridge');
-const wrapperFiles = ['extension.mjs', 'canvas.mjs', 'bridge.mjs', 'session-bridge.mjs', 'guidance.mjs', 'copilot-extension.json', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'runtime.mjs', 'build-manifest.json', 'skills/drawio/SKILL.md'];
+const wrapperFiles = ['extension.mjs', 'canvas.mjs', 'bridge.mjs', 'session-bridge.mjs', 'guidance.mjs', 'version.mjs', 'version.txt', 'copilot-extension.json', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'runtime.mjs', 'build-manifest.json', 'skills/drawio/SKILL.md'];
 const copy = (root: string, file: string, target: string) => {
   mkdirSync(dirname(target), { recursive: true });
   cpSync(join(root, file), target, { recursive: true, dereference: true });
@@ -38,6 +38,8 @@ export async function installExtension({
     for (const file of wrapperFiles) {
       if (!readFileSync(join(staged, file)).length) throw new Error(`Empty implementation file: ${file}`);
     }
+    const { readReleaseVersion } = await import(pathToFileURL(join(staged, 'version.mjs')).href);
+    readReleaseVersion(join(staged, 'version.txt'));
     const runtimeFile = join(staged, 'runtime.mjs');
     const metadata = JSON.parse(readFileSync(join(staged, 'build-manifest.json'), 'utf8'));
     const digest = createHash('sha256').update(readFileSync(runtimeFile)).digest('hex');

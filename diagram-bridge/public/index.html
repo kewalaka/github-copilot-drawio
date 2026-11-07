@@ -8,8 +8,11 @@
 </head>
 <body>
   <header>
-    <strong>Architecture editor</strong>
-    <span class="badge">Local only</span>
+    <div class="editor-heading">
+      <strong>Architecture editor</strong>
+      <small class="release-info"><span id="version"></span><button id="check-updates" title="Check public release tags; successful checks are cached for one hour.">Check updates</button><a id="update-link" hidden target="_blank" rel="noopener noreferrer"></a><span id="update-status" role="status"></span></small>
+    </div>
+    <span class="badge">Local editor</span>
     <span id="status" role="status">Connecting…</span>
     <button id="save" hidden disabled title="Retry saving the current edits after a failed save.">Retry save</button>
     <button id="preview">SVG preview</button>

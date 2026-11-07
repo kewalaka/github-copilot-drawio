@@ -5870,11 +5870,79 @@ async function openDesktop(filename, { platform = process.platform, find = findE
   }
 }
 
+// diagram-bridge/updates.ts
+var repository = "https://github.com/kewalaka/github-copilot-drawio";
+var tagsEndpoint = "https://api.github.com/repos/kewalaka/github-copilot-drawio/tags";
+var stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+function compareVersions(a, b) {
+  const left = a.split(".").map(BigInt);
+  const right = b.split(".").map(BigInt);
+  for (let i = 0;i < 3; i++) {
+    if (left[i] !== right[i])
+      return left[i] > right[i] ? 1 : -1;
+  }
+  return 0;
+}
+function createUpdateChecker(currentVersion, {
+  fetchTags = fetch,
+  now = Date.now
+} = {}) {
+  let cached;
+  let expires = 0;
+  let pending;
+  async function discover() {
+    if (!stable.test(currentVersion))
+      return { status: "unavailable", currentVersion };
+    const signal = AbortSignal.timeout(5000);
+    let latestVersion;
+    for (let page = 1;page <= 5; page++) {
+      const response = await fetchTags(`${tagsEndpoint}?per_page=100&page=${page}`, {
+        signal,
+        redirect: "error",
+        credentials: "omit",
+        headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" }
+      });
+      if (!response.ok)
+        throw new Error("Tag check unavailable");
+      const tags = await response.json();
+      if (!Array.isArray(tags) || tags.length > 100 || tags.some((tag) => typeof tag?.name !== "string"))
+        throw new Error("Invalid tag response");
+      for (const { name } of tags) {
+        if (!name.startsWith("v") || !stable.test(name.slice(1)))
+          continue;
+        const version = name.slice(1);
+        if (!latestVersion || compareVersions(version, latestVersion) > 0)
+          latestVersion = version;
+      }
+      if (tags.length < 100) {
+        return latestVersion && compareVersions(latestVersion, currentVersion) > 0 ? { status: "available", currentVersion, latestVersion, url: `${repository}/tree/v${latestVersion}/drawio-canvas` } : { status: "current", currentVersion, ...latestVersion ? { latestVersion } : {} };
+      }
+    }
+    throw new Error("Tag pagination limit reached");
+  }
+  return async function check() {
+    if (cached && now() < expires)
+      return cached;
+    if (!pending) {
+      pending = discover().catch(() => ({ status: "unavailable", currentVersion })).then((result) => {
+        cached = result;
+        expires = now() + (result.status === "unavailable" ? 5 * 60000 : 60 * 60000);
+        return result;
+      }).finally(() => {
+        pending = undefined;
+      });
+    }
+    return pending;
+  };
+}
+
 // diagram-bridge/server.ts
 async function startBridge(options) {
   const root = dirname(fileURLToPath(import.meta.url));
   const assets = resolve(options.assets);
   const searchShapes = createShapeSearch(assets);
+  const version = options.version ?? "development";
+  const checkUpdates = options.updateChecker ?? createUpdateChecker(version);
   const filename = resolve(options.filename);
   if (!filename.endsWith(".drawio.svg"))
     throw new Error("Drawing file must end in .drawio.svg");
@@ -5993,6 +6061,11 @@ async function startBridge(options) {
             if (!paused)
               checkDisk();
             return json(documentState());
+          }
+          if (url2.pathname === "/api/updates") {
+            if (url2.search)
+              throw new BridgeError("Update checks do not accept parameters");
+            return json(await checkUpdates());
           }
           if (url2.pathname === "/api/shapes") {
             if (Array.from(url2.searchParams.keys()).some((key) => !["query", "limit"].includes(key)) || url2.searchParams.getAll("query").length > 1 || url2.searchParams.getAll("limit").length > 1)
@@ -6168,7 +6241,7 @@ async function startBridge(options) {
       let file;
       let content;
       if (url2.pathname === "/config.js") {
-        return new Response(`window.BRIDGE_TOKEN=${JSON.stringify(token)};`, { headers: { "Content-Type": "text/javascript", "Cache-Control": "no-store", "Content-Security-Policy": csp, "Cross-Origin-Resource-Policy": "same-origin" } });
+        return new Response(`window.BRIDGE_TOKEN=${JSON.stringify(token)};window.BRIDGE_VERSION=${JSON.stringify(version)};`, { headers: { "Content-Type": "text/javascript", "Cache-Control": "no-store", "Content-Security-Policy": csp, "Cross-Origin-Resource-Policy": "same-origin" } });
       }
       if (url2.pathname === "/diagram.svg") {
         checkDisk();
@@ -6333,8 +6406,11 @@ var public_default = `<!doctype html>
 </head>
 <body>
   <header>
-    <strong>Architecture editor</strong>
-    <span class="badge">Local only</span>
+    <div class="editor-heading">
+      <strong>Architecture editor</strong>
+      <small class="release-info"><span id="version"></span><button id="check-updates" title="Check public release tags; successful checks are cached for one hour.">Check updates</button><a id="update-link" hidden target="_blank" rel="noopener noreferrer"></a><span id="update-status" role="status"></span></small>
+    </div>
+    <span class="badge">Local editor</span>
     <span id="status" role="status">Connecting…</span>
     <button id="save" hidden disabled title="Retry saving the current edits after a failed save.">Retry save</button>
     <button id="preview">SVG preview</button>
@@ -6350,6 +6426,9 @@ var public_default = `<!doctype html>
 var style_default = `* { box-sizing: border-box; }
 body { margin: 0; height: 100vh; display: flex; flex-direction: column; font: 14px system-ui, sans-serif; color: #1f2937; background: #fff; }
 header { display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-bottom: 1px solid #d1d5db; }
+.editor-heading { display: flex; flex-direction: column; gap: 3px; }
+.release-info { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; color: #6b7280; }
+#check-updates { border: 0; background: none; padding: 0; color: #005fb8; font-size: inherit; }
 .badge { border: 1px solid #86efac; border-radius: 20px; padding: 3px 8px; color: #166534; font-size: 12px; }
 #status { margin-right: auto; font-size: 13px; }
 #status.error { color: #b91c1c; }
@@ -6370,6 +6449,10 @@ const saveButton = document.querySelector('#save');
 const busy = document.querySelector('#busy');
 const openButton = document.querySelector('#open-drawio');
 const resumeButton = document.querySelector('#resume');
+const updateButton = document.querySelector('#check-updates');
+const updateStatus = document.querySelector('#update-status');
+const updateLink = document.querySelector('#update-link');
+document.querySelector('#version').textContent = window.BRIDGE_VERSION === 'development' ? 'Development build' : \`v\${window.BRIDGE_VERSION}\`;
 const editorId = sessionStorage.bridgeEditorId ||= crypto.randomUUID();
 let state;
 let editorLease;
@@ -6394,6 +6477,26 @@ async function api(path, body, keepalive = false) {
   if (!response.ok) throw new Error(result.error || 'Request failed');
   return result;
 }
+async function checkForUpdates() {
+  updateButton.disabled = true;
+  updateStatus.textContent = 'Checking…';
+  updateLink.hidden = true;
+  try {
+    const result = await api('updates');
+    if (result.status === 'available') {
+      updateLink.textContent = \`v\${result.latestVersion} available\`;
+      updateLink.href = result.url;
+      updateLink.hidden = false;
+      updateStatus.textContent = '';
+    } else {
+      updateStatus.textContent = result.status === 'current' ? 'Up to date' : 'Check unavailable';
+    }
+  } catch { updateStatus.textContent = 'Check unavailable'; }
+  finally { updateButton.disabled = false; }
+}
+updateButton.addEventListener('click', checkForUpdates);
+checkForUpdates();
+
 function report(message, error = false) { status.textContent = message; status.classList.toggle('error', error); }
 function enqueue(action) { chain = chain.then(action).catch(error => report(error.message, true)); return chain; }
 function send(message) { frame.contentWindow.postMessage(JSON.stringify(message), location.origin); }
