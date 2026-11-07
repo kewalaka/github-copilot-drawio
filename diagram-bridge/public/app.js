@@ -74,7 +74,11 @@ async function saveCurrent(xml) {
     const result = await exportDiagram('xmlsvg');
     state = await api('save', { svg: decodeSvg(result.data), expectedRevision: state.revision });
     unsaved = false;
+    saveButton.hidden = true;
     report(`Saved · revision ${state.revision}`);
+  } catch (error) {
+    saveButton.hidden = false;
+    throw error;
   } finally { suppressAutosave = false; block(false); }
 }
 async function runJob(job) {
@@ -89,6 +93,8 @@ async function runJob(job) {
     began = true;
     const exported = await exportDiagram('xmlsvg', current.xml);
     state = await api('commit', { jobId: job.id, svg: decodeSvg(exported.data) });
+    unsaved = false;
+    saveButton.hidden = true;
     report(`Agent update saved · revision ${state.revision}`);
   } catch (error) {
     if (began && restore) send({ action: 'load', xml: restore, autosave: 1, title: 'Architecture', fit: 1 });

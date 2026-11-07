@@ -212,10 +212,12 @@ test('rejected manual drafts still warn before closing and can be saved after re
   const headers = { Authorization: `Bearer ${bridge.token}` };
   await page.goto(bridge.url);
   await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  await expect(page.getByRole('button', { name: 'Retry save', includeHidden: true })).toBeHidden();
   const savedSvg = readFileSync(bridge.filename, 'utf8');
   await page.route('**/api/draft', route => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'Rejected test draft' }) }));
   await dragFunction(page);
   await expect(page.locator('#status')).toContainText('Rejected test draft');
+  await expect(page.getByRole('button', { name: 'Retry save' })).toBeEnabled();
   const document = await (await request.get(bridge.url + '/api/document', { headers })).json();
   expect(document.dirty).toBe(false);
   expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
@@ -229,7 +231,78 @@ test('rejected manual drafts still warn before closing and can be saved after re
   await page.locator('#save').click();
   await expect(page.locator('#status')).toContainText('Saved');
   expect(await warns()).toBe(false);
+  await expect(page.locator('#save')).toBeHidden();
   expect(readFileSync(bridge.filename, 'utf8')).not.toBe(savedSvg);
+});
+
+test('retry save is shown only after failed autosave, stays usable after failure and hides after success', async ({ page, request, bridge }) => {
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  const read = async () => (await request.get(bridge.url + '/api/document', { headers })).json();
+  await page.goto(bridge.url);
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  const retry = page.locator('#save');
+  await expect(retry).toBeHidden();
+  const original = await read();
+  const savedSvg = readFileSync(bridge.filename, 'utf8');
+  let held: Promise<void> | undefined;
+  await page.route('**/api/save', async route => {
+    await held;
+    await route.fulfill({ status: 500, json: { error: 'Injected autosave failure' } });
+  });
+  await dragFunction(page);
+  await expect(page.locator('#status')).toContainText('Injected autosave failure');
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeEnabled();
+  expect((await read()).dirty).toBe(true);
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
+  let release!: () => void;
+  held = new Promise<void>(resolve => { release = resolve; });
+  const failedRetry = page.waitForResponse(response => response.url().endsWith('/api/save') && response.status() === 500);
+  await retry.click();
+  await expect(retry).toBeDisabled();
+  release();
+  await failedRetry;
+  await expect(retry).toBeEnabled();
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
+  await page.unroute('**/api/save');
+  await retry.click();
+  await expect(page.locator('#status')).toContainText('Saved');
+  await expect(retry).toBeHidden();
+  const saved = await read();
+  expect(saved.dirty).toBe(false);
+  expect(saved.savedRevision).toBe(saved.revision);
+  expect(geometry(saved.xml, 'function')).not.toBe(geometry(original.xml, 'function'));
+  expect(topology(diagramXml(readFileSync(bridge.filename, 'utf8')))).toBe(topology(saved.xml));
+  await dragFunction(page);
+  await expect.poll(async () => geometry((await read()).xml, 'function')).not.toBe(geometry(saved.xml, 'function'));
+  await expect.poll(async () => (await read()).dirty).toBe(false);
+  await expect(retry).toBeHidden();
+});
+
+test('a successful agent save clears a previous autosave retry without losing the manual draft', async ({ page, request, bridge }) => {
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  const read = async () => (await request.get(bridge.url + '/api/document', { headers })).json();
+  await page.goto(bridge.url);
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  await page.route('**/api/save', route => route.fulfill({ status: 500, json: { error: 'Injected autosave failure' } }));
+  await dragFunction(page);
+  await expect(page.locator('#save')).toBeVisible();
+  const manual = await read();
+  await page.unroute('**/api/save');
+  const job = await (await request.post(bridge.url + '/api/operations', { headers, data: {
+    expectedRevision: manual.revision, operations: [{ kind: 'update', id: 'function', label: 'Saved with manual draft' }],
+  } })).json();
+  await expect.poll(async () => (await (await request.get(bridge.url + '/api/jobs/' + job.id, { headers })).json()).status,
+    { timeout: 30_000 }).toBe('completed');
+  await expect(page.locator('#save')).toBeHidden();
+  const saved = await read();
+  expect(saved.dirty).toBe(false);
+  expect(geometry(saved.xml, 'function')).toBe(geometry(manual.xml, 'function'));
+  expect(await page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(false);
 });
 
 test('manual drag → agent update → embedded SVG reopen, entirely local', async ({ page, request, bridge }) => {
@@ -312,9 +385,8 @@ test('failed agent save restores the live diagram and releases the save lock', a
   await expect(page.frameLocator('#editor').getByText('Ingestion Function App', { exact: true })).toBeVisible();
   expect(topology((await read()).xml)).toBe(topology(before.xml));
   expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
+  await expect(page.locator('#save')).toBeHidden();
   await page.unroute('**/api/commit');
-  await page.locator('#save').click();
-  await expect(page.locator('#status')).toContainText('Saved');
   const retry = await queue();
   await expect.poll(async () => (await (await request.get(bridge.url + '/api/jobs/' + retry.id, { headers })).json()).status,
     { timeout: 30_000 }).toBe('completed');
@@ -376,11 +448,8 @@ test('local shape lookup supports progressive saved stages; later conflicts/fail
     if (!localUrls.some(url => request.url().startsWith(url + '/')) && !/^(data|blob):/.test(request.url())) external.push(request.url());
   });
   await page.goto(opened.url);
-  await expect(page.locator('#save')).toBeEnabled({ timeout: 30_000 });
-  const firstSave = page.waitForResponse(response => response.url().endsWith('/api/save') && response.ok());
-  await page.locator('#save').click();
-  await firstSave;
-  await expect(page.locator('#status')).toContainText('Saved');
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  await expect(page.locator('#save')).toBeHidden();
   const headers = { Authorization: `Bearer ${bridge.token}` };
   expect((await request.get(bridge.url + '/api/shapes?query=rectangle')).status()).toBe(401);
   for (const query of ['query=rectangle&limit=51', 'query=rectangle&remote=true', 'query=rectangle&query=cloud']) {

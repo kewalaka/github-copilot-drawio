@@ -14,7 +14,7 @@ For complex requests, use meaningful operation batches. Read the document, pass 
 
 ## Drawing controls
 
-- **Save now** renders and saves the same editable SVG again; edits already autosave. Use it to retry a failed save. It does not create a download.
+- Edits autosave; the status confirms when they are saved. **Retry save** appears only after saving fails and disappears after a successful save. It retries the current edits in the same editable SVG, not a download or a failed agent operation.
 - **SVG preview** opens the saved SVG without editing it.
 - **Open in Draw.io** saves first, pauses this canvas and hands off the same file. On macOS it finds draw.io through Launch Services; on Windows it checks PATH and standard install locations; on Linux it checks `drawio` on PATH. If unavailable, it opens the local browser editor, never a hosted service. Allow pop-ups or click **Open browser editor** if needed.
 - Close the other editor, then choose **Resume here**. Desktop edits are validated and loaded from the same SVG. An active browser editor blocks resuming; normal close releases ownership immediately, with a 15-second lease timeout if close notification fails (crash/disconnection). The desktop pause survives bridge restarts; closing desktop cannot be detected automatically.
