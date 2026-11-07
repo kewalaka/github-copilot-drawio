@@ -8,6 +8,7 @@ import { applyOperations, BridgeError, diagramXml, documentContent, validateSvg,
 import { emptyDrawing } from './empty';
 import { createShapeSearch } from './shapes';
 import { openDesktop } from './desktop';
+import { createUpdateChecker } from './updates';
 
 type BridgeOptions = {
   filename: string;
@@ -16,12 +17,16 @@ type BridgeOptions = {
   port?: number;
   publicFiles?: Record<string, string>;
   publicDir?: string;
+  version?: string;
+  updateChecker?: ReturnType<typeof createUpdateChecker>;
 };
 
 export async function startBridge(options: BridgeOptions) {
   const root = dirname(fileURLToPath(import.meta.url));
   const assets = resolve(options.assets);
   const searchShapes = createShapeSearch(assets);
+  const version = options.version ?? 'development';
+  const checkUpdates = options.updateChecker ?? createUpdateChecker(version);
   const filename = resolve(options.filename);
   if (!filename.endsWith('.drawio.svg')) throw new Error('Drawing file must end in .drawio.svg');
   if (resolve(options.runtimeFile) === filename) throw new Error('Runtime configuration must not replace the drawing file');
@@ -111,6 +116,10 @@ export async function startBridge(options: BridgeOptions) {
         const origin = request.headers.get('origin');
         if (request.method === 'GET') {
           if (url.pathname === '/api/document') { if (!paused) checkDisk(); return json(documentState()); }
+          if (url.pathname === '/api/updates') {
+            if (url.search) throw new BridgeError('Update checks do not accept parameters');
+            return json(await checkUpdates());
+          }
           if (url.pathname === '/api/shapes') {
             if (Array.from(url.searchParams.keys()).some(key => !['query', 'limit'].includes(key)) || url.searchParams.getAll('query').length > 1 || url.searchParams.getAll('limit').length > 1) throw new BridgeError('Unknown or repeated shape search parameter');
             return json(searchShapes({ query: url.searchParams.get('query') ?? '', ...(url.searchParams.has('limit') ? { limit: Number(url.searchParams.get('limit')) } : {}) }));
@@ -226,7 +235,7 @@ export async function startBridge(options: BridgeOptions) {
       let file: string;
       let content: string | Buffer;
       if (url.pathname === '/config.js') {
-        return new Response(`window.BRIDGE_TOKEN=${JSON.stringify(token)};`, { headers: { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store', 'Content-Security-Policy': csp, 'Cross-Origin-Resource-Policy': 'same-origin' } });
+        return new Response(`window.BRIDGE_TOKEN=${JSON.stringify(token)};window.BRIDGE_VERSION=${JSON.stringify(version)};`, { headers: { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store', 'Content-Security-Policy': csp, 'Cross-Origin-Resource-Policy': 'same-origin' } });
       }
       if (url.pathname === '/diagram.svg') {
         checkDisk();

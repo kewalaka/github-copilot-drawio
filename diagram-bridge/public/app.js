@@ -4,6 +4,10 @@ const saveButton = document.querySelector('#save');
 const busy = document.querySelector('#busy');
 const openButton = document.querySelector('#open-drawio');
 const resumeButton = document.querySelector('#resume');
+const updateButton = document.querySelector('#check-updates');
+const updateStatus = document.querySelector('#update-status');
+const updateLink = document.querySelector('#update-link');
+document.querySelector('#version').textContent = window.BRIDGE_VERSION === 'development' ? 'Development build' : `v${window.BRIDGE_VERSION}`;
 const editorId = sessionStorage.bridgeEditorId ||= crypto.randomUUID();
 let state;
 let editorLease;
@@ -28,6 +32,26 @@ async function api(path, body, keepalive = false) {
   if (!response.ok) throw new Error(result.error || 'Request failed');
   return result;
 }
+async function checkForUpdates() {
+  updateButton.disabled = true;
+  updateStatus.textContent = 'Checking…';
+  updateLink.hidden = true;
+  try {
+    const result = await api('updates');
+    if (result.status === 'available') {
+      updateLink.textContent = `v${result.latestVersion} available`;
+      updateLink.href = result.url;
+      updateLink.hidden = false;
+      updateStatus.textContent = '';
+    } else {
+      updateStatus.textContent = result.status === 'current' ? 'Up to date' : 'Check unavailable';
+    }
+  } catch { updateStatus.textContent = 'Check unavailable'; }
+  finally { updateButton.disabled = false; }
+}
+updateButton.addEventListener('click', checkForUpdates);
+checkForUpdates();
+
 function report(message, error = false) { status.textContent = message; status.classList.toggle('error', error); }
 function enqueue(action) { chain = chain.then(action).catch(error => report(error.message, true)); return chain; }
 function send(message) { frame.contentWindow.postMessage(JSON.stringify(message), location.origin); }

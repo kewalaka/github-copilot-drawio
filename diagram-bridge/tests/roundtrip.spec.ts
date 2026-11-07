@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { applyOperations, diagramXml, parse, topology } from '../model';
 import { canvasOptions } from '../../drawio-canvas/canvas.mjs';
 import { seed } from '../seed';
+import { readReleaseVersion } from '../../drawio-canvas/version.mjs';
 
 type Runtime = { url: string; token: string; filename: string };
 const nodeExecutable = process.versions.bun ? Bun.which('node') : process.execPath;
@@ -28,8 +29,12 @@ const test = base.extend<{ bridge: Runtime & { restart: () => Promise<Runtime>; 
       child = spawn(nodeExecutable, ['--input-type=module', '--eval', `
         import { resolve } from 'node:path';
         import { startBridge } from '../drawio-canvas/runtime.mjs';
+        import { readReleaseVersion } from '../drawio-canvas/version.mjs';
+        const version = readReleaseVersion();
         if (process.versions.bun) throw new Error('Production bridge must run in Node');
         await startBridge({
+          version,
+          updateChecker: async () => ({ status: 'current', currentVersion: version }),
           filename: process.env.DIAGRAM_FILE,
           runtimeFile: process.env.BRIDGE_RUNTIME,
           assets: process.env.DRAWIO_ASSETS ?? resolve('vendor/drawio'),
@@ -53,6 +58,33 @@ const test = base.extend<{ bridge: Runtime & { restart: () => Promise<Runtime>; 
     }
   },
 });
+test('release version sits beneath the editor title and an available tag links to a manual upgrade', async ({ page, bridge }, testInfo) => {
+  await page.route('**/api/updates', route => route.fulfill({ json: { status: 'available', latestVersion: '0.2.0', url: 'https://github.com/kewalaka/github-copilot-drawio/tree/v0.2.0/drawio-canvas' } }));
+  await page.goto(bridge.url);
+  await expect(page.locator('#version')).toHaveText(`v${readReleaseVersion()}`);
+  await expect(page.locator('#update-link')).toHaveText('v0.2.0 available');
+  await expect(page.locator('#update-link')).toHaveAttribute('href', 'https://github.com/kewalaka/github-copilot-drawio/tree/v0.2.0/drawio-canvas');
+  await expect(page.locator('#status')).toContainText('Saved');
+  const title = await page.locator('.editor-heading strong').boundingBox();
+  const version = await page.locator('#version').boundingBox();
+  expect(version!.y).toBeGreaterThan(title!.y);
+  expect(await page.locator('#version').evaluate(element => getComputedStyle(element).fontSize)).toBe('11px');
+  await page.screenshot({ path: testInfo.outputPath('version-ui.png') });
+});
+
+test('unavailable tag checks do not interfere with save status or drawing content', async ({ page, bridge }) => {
+  await page.goto(bridge.url);
+  await expect(page.locator('#update-status')).toHaveText('Up to date');
+  await expect(page.locator('#status')).toContainText('Saved');
+  const before = readFileSync(bridge.filename, 'utf8');
+  await page.route('**/api/updates', route => route.fulfill({ status: 503, json: { error: 'Offline' } }));
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#update-status')).toHaveText('Check unavailable');
+  await expect(page.locator('#status')).toContainText('Saved');
+  await expect(page.locator('#check-updates')).toBeEnabled();
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(before);
+});
+
 test('Node HTTP boundary rejects foreign hosts, origins, unauthenticated requests and private asset paths', async ({ bridge }) => {
   const foreignHostStatus = await new Promise<number | undefined>((resolve, reject) => {
     const request = httpRequest(bridge.url + '/health', { headers: { Host: 'localhost' } }, response => {
@@ -64,6 +96,11 @@ test('Node HTTP boundary rejects foreign hosts, origins, unauthenticated request
   });
   expect(foreignHostStatus).toBe(403);
   expect((await fetch(bridge.url + '/api/document')).status).toBe(401);
+  expect((await fetch(bridge.url + '/api/updates')).status).toBe(401);
+  const updateHeaders = { Authorization: `Bearer ${bridge.token}` };
+  expect((await fetch(bridge.url + '/api/updates', { headers: { ...updateHeaders, Origin: 'https://example.com' } })).status).toBe(403);
+  expect((await fetch(bridge.url + '/api/updates?url=https://example.com', { headers: updateHeaders })).status).toBe(400);
+  expect((await fetch(bridge.url + '/api/updates', { headers: updateHeaders })).status).toBe(200);
   expect((await fetch(bridge.url + '/api/editor', {
     method: 'POST', headers: { Authorization: `Bearer ${bridge.token}`, Origin: 'http://localhost' },
     body: JSON.stringify({ editorId: 'foreign-origin' }),

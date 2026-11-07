@@ -4,11 +4,7 @@ Serves the editor, authenticated document/shape APIs and revision-checked SVG sa
 
 ## Local assets
 
-Install the `drawio-canvas` folder through Copilot's **Install extension from repository** action; see the [installation and manual-upgrade instructions](../README.md#install). Copilot imports the supplied `runtime.mjs` in its managed Node process, with the XML dependency and frontend already bundled. End users do not need Bun, standalone Node or a package-install step.
-
-On first open, missing assets are prepared from the pinned draw.io **32.6.9** web archive using Node's streaming download, `unzip` on macOS/Linux or Windows PowerShell/.NET ZIP extraction. This requires public upstream network access and the applicable OS extractor, not runtime GitHub credentials or a hosted editor. Valid local/prepared assets are reused. The archive's pinned size/SHA-256 and safe ZIP paths are checked before extraction; every extracted entry and required editor/shape resource is checked before a prepared directory is published. Explicit incompatible `DRAWIO_ASSETS` selections fail without fallback.
-
-Concurrent preparation uses a destination lock and adjacent staging. Caught publication failures restore previous assets without modifying private settings or session drawings. Replacement is two directory renames, not crash-atomic; interruption leaves recovery files/locks for inspection rather than silently deleting them. Manual implementation upgrades likewise publish selected files individually with rollback, not a whole-extension atomic swap. Save drawings first; reload/restart is a deliberate user action after success, never an installer action. The native install action cannot currently replace an existing folder.
+For app installation, runtime/asset preparation and manual upgrades, see the [installation steps](../README.md#install) and [installation design](../DESIGN.md#installation-and-upgrades). The commands below prepare checkout assets for development or standalone use.
 
 The official source is [jgraph/drawio release v32.6.9](https://github.com/jgraph/drawio/releases/tag/v32.6.9), asset `draw.war` (49,701,599 bytes). Its [published GitHub release metadata](https://api.github.com/repos/jgraph/drawio/releases/tags/v32.6.9) supplies SHA-256 `31afc82b7920c409d0591f6126ccb6c377d7800e7f11ab324f88bdf1e4249ce7`, pinned in the installer. Installation does not query releases or select a newer version.
 
@@ -36,7 +32,7 @@ The development `start.ts` entry calls the pure server factory and prints only i
 
 Open the printed loopback URL, or pass the absolute runtime JSON path as the canvas's `runtimeFile`. Keep runtime contents private. An existing editable SVG is reopened; a missing drawing starts empty and is saved by the editor. Manual edits auto-save. Stop a terminal-run bridge with Ctrl+C.
 
-Only one editor owns each drawing. Close any other editor and wait 15 seconds for its lease to expire. The SVG stores the rendered preview, embedded images and editable XML for all pages; there is no separate XML source file.
+Only one editor owns each drawing. Normal browser close releases ownership immediately; allow up to 15 seconds only after a crash or disconnection. The SVG stores the rendered preview, embedded images and editable XML for all pages; there is no separate XML source file.
 
 ## Operations and persistence
 

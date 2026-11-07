@@ -29,7 +29,27 @@ beforeEach(() => {
 });
 afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 const noDownload = async () => { throw new Error('Unexpected acquisition'); };
-const wrapperFiles = ['extension.mjs', 'canvas.mjs', 'bridge.mjs', 'session-bridge.mjs', 'guidance.mjs', 'copilot-extension.json', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'runtime.mjs', 'build-manifest.json', 'skills'];
+
+test('version-only upgrades reach ordinary Node without rebundling the runtime', async () => {
+  const source = sourceFixture();
+  writeFileSync(join(source, 'version.txt'), '0.1.0\n');
+  const destination = await installExtension({ home, assets, sourceDirectory: source, acquireAssets: noDownload });
+  const before = readFileSync(join(destination, 'build-manifest.json'), 'utf8');
+  expect((await nodeBridge(destination)).version).toBe('0.1.0');
+  writeFileSync(join(source, 'version.txt'), '0.2.0\n');
+  await installExtension({ home, assets, sourceDirectory: source, acquireAssets: noDownload });
+  expect(readFileSync(join(destination, 'build-manifest.json'), 'utf8')).toBe(before);
+  expect((await nodeBridge(destination)).version).toBe('0.2.0');
+});
+
+test('invalid release metadata aborts installation without touching private files', async () => {
+  const source = sourceFixture();
+  writeFileSync(join(source, 'version.txt'), 'not-a-version\n');
+  const destination = existing();
+  await expect(installExtension({ home, assets, sourceDirectory: source, acquireAssets: noDownload })).rejects.toThrow('Invalid extension release version');
+  oldPreserved(destination);
+});
+const wrapperFiles = ['extension.mjs', 'canvas.mjs', 'bridge.mjs', 'session-bridge.mjs', 'guidance.mjs', 'version.mjs', 'version.txt', 'copilot-extension.json', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'runtime.mjs', 'build-manifest.json', 'skills'];
 function sourceFixture() {
   const source = join(home, 'checkout/drawio-canvas'); mkdirSync(source, { recursive: true });
   for (const file of wrapperFiles) cpSync(join(import.meta.dir, file), join(source, file), { recursive: true });
@@ -62,9 +82,10 @@ async function nodeBridge(destination: string, { edit = false } = {}) {
     import { pathToFileURL } from 'node:url';
     const home = process.env.DRAWIO_TEST_HOME;
     const { startBridge, ensureAssets } = await import(pathToFileURL(join(home, 'extensions/drawio-canvas/runtime.mjs')));
+    const { readReleaseVersion } = await import(pathToFileURL(join(home, 'extensions/drawio-canvas/version.mjs')));
     const directory = join(home, 'session-state/existing-session/files/diagram-bridge');
     const assets = await ensureAssets({ destination: join(home, 'extensions/drawio-canvas/artifacts/vendor/drawio') });
-    const bridge = await startBridge({ filename: join(directory, 'architecture.drawio.svg'), runtimeFile: join(directory, 'runtime.json'), assets, publicFiles: {'style.css':'bad override'} });
+    const bridge = await startBridge({ filename: join(directory, 'architecture.drawio.svg'), runtimeFile: join(directory, 'runtime.json'), assets, version: readReleaseVersion(), publicFiles: {'style.css':'bad override'} });
     try {
       const runtime = JSON.parse(readFileSync(join(directory, 'runtime.json')));
       const request = async (path, body) => {
@@ -86,8 +107,10 @@ async function nodeBridge(destination: string, { edit = false } = {}) {
       const css = await fetch(bridge.url + '/style.css');
       const js = await fetch(bridge.url + '/app.js');
       const page = await fetch(bridge.url + '/');
+      const config = await (await fetch(bridge.url + '/config.js')).text();
+      const version = JSON.parse(config.match(/window\\.BRIDGE_VERSION=("[^"]*");/)[1]);
       const shape = await request('shapes?query=rectangle&limit=1');
-      console.log(JSON.stringify({xml:document.xml, dirty:document.dirty, cssType:css.headers.get('content-type'), css:await css.text(), jsType:js.headers.get('content-type'), js:await js.text(), page:await page.text(), shape:shape.shapes[0].style}));
+      console.log(JSON.stringify({version, xml:document.xml, dirty:document.dirty, cssType:css.headers.get('content-type'), css:await css.text(), jsType:js.headers.get('content-type'), js:await js.text(), page:await page.text(), shape:shape.shapes[0].style}));
     } finally { await bridge.close(); await bridge.close(); }
   `], { cwd: destination, env: { ...process.env, DRAWIO_TEST_HOME: home, DRAWIO_TEST_EDIT: edit ? 'yes' : 'no' }, timeout: 20_000, maxBuffer: 2_000_000 });
   return JSON.parse(stdout);
