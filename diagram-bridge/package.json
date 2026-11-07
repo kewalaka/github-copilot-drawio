@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run server.ts",
+    "start": "bun run start.ts",
+    "build:runtime": "bun run ../drawio-canvas/build.ts",
     "test": "bun test tests/model.test.ts",
     "test:browser": "bunx playwright test"
   },

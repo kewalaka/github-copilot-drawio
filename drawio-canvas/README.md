@@ -1,24 +1,32 @@
-# Draw.io architecture canvas
+# Draw.io canvas extension
 
-A user-installed GitHub Copilot canvas wrapping an existing local draw.io editor bridge. The user and agent edit one `.drawio.svg`, with embedded editable XML. This package contains no diagrams, credentials, local configuration or draw.io assets.
+A user-installed Copilot SDK canvas with a local bridge, session-separated editable SVGs and general drawing guidance.
 
-## Use
+## Setup and use
 
-1. Start the local diagram bridge with Bun. Keep its runtime JSON private.
-2. Close any other editor for that diagram and wait 15 seconds for its lease to expire.
-3. Ask the agent to open `drawio-architecture` with `runtimeFile` set to the absolute local runtime JSON path.
-4. Use `read_document` before `apply_operations`. Pass the revision just read as `expectedRevision`.
+Save open drawings before installation or upgrades. Install this repository's `drawio-canvas` folder using Copilot's **Install extension from repository** action. The bundled runtime runs inside Copilot's extension process; separate Bun, Node and desktop draw.io installations are not required. First open stages and validates pinned browser assets automatically; valid cached assets and healthy existing bridges are reused. Explicit `DRAWIO_ASSETS` must identify complete compatible local assets; invalid paths do not fall back. If startup reports an incomplete runtime, reinstall the complete folder; for asset preparation failures, check network/cache access, and for drawing storage errors, restore private read/write access. Existing-folder upgrades still require host-managed replacement after saving. Reload only through a supported host action, or restart Copilot after saving.
 
-New components need stable IDs and geometry. Connectors need endpoints, a label and one of `relationship`, `network` or `data`. Existing component geometry and parent are protected unless the user explicitly permits `relayout: true`. Updates finish only after the editor confirms persistence.
+Open `drawio-architecture` without input to start or reuse the session's bridge. Drawings live under `$COPILOT_HOME/session-state/<sessionId>/files/diagram-bridge/` (`COPILOT_HOME` defaults to `~/.copilot`). New panels and provider restarts retain the drawing; another session starts separately. Explicit `runtimeFile` opens a shared bridge without changing defaults. Reopening that panel without input retains its shared selection until the panel closes; after a provider restart, supply the shared path again if the host has not retained the original input. Session-owned bridges recover from stale-port authentication failures, but document identity mismatches and conflicts remain errors.
 
-On conflicts, read again and reassess the change. If an update times out, inspect current state before retrying; a timeout does not guarantee rollback. After restarting the bridge, reopen the canvas to load its new loopback URL.
+The extension appends a short instruction pointing agents to `drawio_get_guidance`, which reads `skills/drawio/SKILL.md` without replacing Copilot's built-in instructions. Canvas actions are `search_shapes`, `read_document` and `apply_operations`. Search returns local styles matched to the served editor assets; it has no online fallback and covers a subset of palettes. Warm searches reuse the parsed index and normalized search fields; filesystem metadata checks detect changed, added or removed assets before reuse.
 
-## Boundaries
+For complex requests, use meaningful operation batches. Read the document, pass its revision, await rendering and save confirmation, then reread before the next stage. Preserve completed stages on later failure. Reassess conflicts and timeout outcomes rather than blindly retrying. Existing geometry, parents and waypoints remain protected unless the user explicitly permits layout changes.
 
-- Requires the separate local diagram bridge; this wrapper does not install draw.io or start the bridge.
-- One active editor per diagram. Closing a canvas does not stop the bridge or delete the SVG.
-- After one successful explicit open, omitted input reopens the remembered diagram across panels and provider restarts. Only its runtime path and filename are saved in `$COPILOT_HOME/extensions/drawio-canvas/artifacts/last-bridge.json` (default `~/.copilot`). Delete that file to forget it; supply `runtimeFile` explicitly to change selection or repair configuration. Credentials are reread locally, never saved in preferences.
-- Runtime credentials remain inside the local provider. Diagram content returned to the agent is processed by Copilot remotely.
-- GitHub gists are unlisted, not confidential storage. Do not add runtime JSON, diagrams or personal configuration here.
+## Drawing controls
 
-Registration was adapted from the MIT-licensed [official Color Orb extension](https://github.com/github/awesome-copilot/tree/main/extensions/color-orb), using the [Copilot SDK canvas API](https://github.com/github/copilot-sdk/blob/main/nodejs/src/canvas.ts). The example renderer was replaced with the local bridge. Keep the supplied license.
+- Edits autosave; the status confirms when they are saved. **Retry save** appears only after saving fails and disappears after a successful save. It retries the current edits in the same editable SVG, not a download or a failed agent operation.
+- **SVG preview** opens the saved SVG without editing it.
+- **Open in Draw.io** saves first, pauses this canvas and hands off the same file. On macOS it finds draw.io through Launch Services; on Windows it checks PATH and standard install locations; on Linux it checks `drawio` on PATH. If unavailable, it opens the local browser editor, never a hosted service. Allow pop-ups or click **Open browser editor** if needed.
+- Close the other editor, then choose **Resume here**. Desktop edits are validated and loaded from the same SVG. An active browser editor blocks resuming; normal close releases ownership immediately, with a 15-second lease timeout if close notification fails (crash/disconnection). The desktop pause survives bridge restarts; closing desktop cannot be detected automatically.
+
+Shape search returns relative image styles usable by both editors. Desktop draw.io supplies its own libraries; old/custom bridge-specific image paths are not rewritten automatically.
+
+## Limits and privacy
+
+- One active editor per drawing; normal browser editor close releases ownership immediately. Allow 15 seconds for lease expiry only if close notification fails (crash/disconnection).
+- Closing a panel neither deletes the SVG nor stops the bridge. Provider shutdown closes only services it started in its own process, never another bridge by PID; the drawing remains on disk.
+- Runtime credentials stay inside the local provider. Diagram content returned to the agent is processed by Copilot remotely.
+- Browser “Download” is not a guaranteed host filesystem location. The bridge's SVG path is the known saved file.
+- Keep runtime JSON, drawings, personal configuration and downloaded assets out of shared extension source.
+
+Registration was adapted from the MIT-licensed [official Color Orb extension](https://github.com/github/awesome-copilot/tree/main/extensions/color-orb), using the [Copilot SDK canvas API](https://github.com/github/copilot-sdk/blob/main/nodejs/src/canvas.ts). Keep the supplied license and draw.io's asset notices.

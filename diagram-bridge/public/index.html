@@ -11,8 +11,10 @@
     <strong>Architecture editor</strong>
     <span class="badge">Local only</span>
     <span id="status" role="status">Connecting…</span>
-    <button id="save" disabled>Save SVG</button>
-    <a id="preview" href="/diagram.svg" target="_blank" rel="noopener">SVG preview</a>
+    <button id="save" hidden disabled title="Retry saving the current edits after a failed save.">Retry save</button>
+    <button id="preview">SVG preview</button>
+    <button id="open-drawio" disabled>Open in Draw.io</button>
+    <button id="resume" hidden disabled>Resume here</button>
   </header>
   <main><iframe id="editor" title="draw.io architecture editor"></iframe><div id="busy" hidden>Saving diagram…</div></main>
 </body>

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { canvasOptions } from './drawio-canvas/canvas.mjs';
 
@@ -21,7 +20,7 @@ let jobFailure = false;
 const id = '123456789012345678901234';
 
 beforeEach(() => {
-  temp = mkdtempSync(join(tmpdir(), 'drawio-canvas-test-'));
+  temp = mkdtempSync(join(import.meta.dir, '.drawio-canvas-test-'));
   runtimeFile = join(temp, 'runtime.json');
   filename = join(temp, 'architecture.drawio.svg');
   token = 'a'.repeat(64);
@@ -54,9 +53,9 @@ beforeEach(() => {
 });
 afterEach(async () => { await server.stop(true); rmSync(temp, { recursive: true, force: true }); });
 
-const ctx = (input?: any, instanceId = 'panel-1') => ({ input, instanceId });
+const ctx = (input?: any, instanceId = 'panel-1', sessionId = 'session-1') => ({ input, instanceId, sessionId });
 const action = (options: any, name: string) => options.actions.find((item: any) => item.name === name).handler;
-const optionsForTest = () => canvasOptions(CanvasError, { preferencesDir: join(temp, 'preferences') });
+const optionsForTest = () => canvasOptions(CanvasError, { bridges: { runtimeFile: async () => runtimeFile } });
 const open = async () => { const options = optionsForTest(); await options.open(ctx({ runtimeFile })); return options; };
 
 test('opens the existing editor and returns document state without runtime credentials', async () => {
@@ -103,56 +102,73 @@ test('supports omitted, empty and null input across panels and provider restarts
   expect(state.revision).toBe(3);
 });
 
-test('persists only path and diagram identity with private file permissions', async () => {
-  await open();
-  const file = join(temp, 'preferences', 'last-bridge.json');
-  expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ runtimeFile, filename });
-  expect(readFileSync(file, 'utf8')).not.toContain(token);
-  expect(statSync(file).mode & 0o777).toBe(0o600);
-  expect(statSync(join(temp, 'preferences')).mode & 0o777).toBe(0o700);
+test('no-input repeated shared opens preserve selection and drawing identity independently of defaults', async () => {
+  const defaultRuntimeFile = join(temp, 'default-runtime.json');
+  const defaultFilename = join(temp, 'default.drawio.svg');
+  const defaultState = { ...state, filename: defaultFilename, xml: '<default/>' };
+  const defaultServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json(defaultState) });
+  let defaultOpens = 0;
+  const options = canvasOptions(CanvasError, { bridges: { runtimeFile: async () => { defaultOpens++; return defaultRuntimeFile; } } });
+  writeFileSync(defaultRuntimeFile, JSON.stringify({ url: `http://127.0.0.1:${defaultServer.port}`, token, filename: defaultFilename }));
+  try {
+    const shared = await options.open(ctx({ runtimeFile }));
+    const defaults = await options.open(ctx(undefined, 'default-panel'));
+    expect(shared.url).not.toBe(defaults.url);
+    for (const input of [undefined, {}, null]) {
+      expect(await options.open(ctx(input))).toEqual(shared);
+      expect(await action(options, 'read_document')(ctx({}))).toEqual(state);
+      expect(await action(options, 'read_document')(ctx({}, 'default-panel'))).toEqual(defaultState);
+    }
+    expect(defaultOpens).toBe(1);
+    writeFileSync(runtimeFile, JSON.stringify({ url: `http://127.0.0.1:${defaultServer.port}`, token, filename: defaultFilename }));
+    await expect(options.open(ctx())).rejects.toMatchObject({ code: 'drawio_document_changed' });
+    writeFileSync(runtimeFile, JSON.stringify({ url: `http://127.0.0.1:${server.port}`, token, filename }));
+    state.filename = defaultFilename;
+    await expect(options.open(ctx())).rejects.toMatchObject({ code: 'drawio_document_changed' });
+    state.filename = filename;
+    expect(await options.open(ctx())).toEqual(shared);
+    options.onClose(ctx());
+    expect(await options.open(ctx())).toEqual(defaults);
+    expect(defaultOpens).toBe(2);
+  } finally { await defaultServer.stop(true); }
 });
 
-test('reports missing configuration without contacting or modifying the drawing', async () => {
-  for (const input of [undefined, {}, null]) {
-    await expect(optionsForTest().open(ctx(input))).rejects.toMatchObject({ code: 'drawio_not_configured' });
-  }
-  expect(existsSync(join(temp, 'preferences'))).toBe(false);
-  expect(operationRequests).toBe(0);
-  expect(state.revision).toBe(3);
+test('repeated default opens restart their session bridge and reload its runtime', async () => {
+  const replacement = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json(state) });
+  let opens = 0;
+  const options = canvasOptions(CanvasError, { bridges: { runtimeFile: async () => {
+    opens++;
+    if (opens > 1) writeFileSync(runtimeFile, JSON.stringify({ url: `http://127.0.0.1:${replacement.port}`, token, filename }));
+    return runtimeFile;
+  } } });
+  try {
+    const first = await options.open(ctx());
+    await server.stop(true);
+    const reopened = await options.open(ctx());
+    expect(opens).toBe(2);
+    expect(reopened.url).not.toBe(first.url);
+    expect(reopened.url).toBe(`http://127.0.0.1:${replacement.port}/`);
+    expect(await action(options, 'read_document')(ctx({}))).toEqual(state);
+  } finally { await replacement.stop(true); }
 });
 
-test('refuses changed remembered identities but permits explicit selection', async () => {
+test('bindings are scoped by session as well as panel identity', async () => {
   const options = await open();
-  filename = join(temp, 'different.drawio.svg');
-  state.filename = filename;
-  writeFileSync(runtimeFile, JSON.stringify({ url: `http://127.0.0.1:${server.port}`, token, filename }));
-  await expect(options.open(ctx())).rejects.toMatchObject({ code: 'drawio_document_changed' });
-  await expect(optionsForTest().open(ctx())).rejects.toMatchObject({ code: 'drawio_document_changed' });
-  await optionsForTest().open(ctx({ runtimeFile }));
-  expect((await optionsForTest().open(ctx())).title).toBe('different.drawio.svg');
+  await expect(action(options, 'read_document')(ctx({}, 'panel-1', 'session-2'))).rejects.toMatchObject({ code: 'drawio_not_open' });
+  await options.open(ctx({ runtimeFile }, 'panel-1', 'session-2'));
+  options.onClose(ctx());
+  expect(await action(options, 'read_document')(ctx({}, 'panel-1', 'session-2'))).toEqual(state);
   expect(operationRequests).toBe(0);
 });
 
-test('failed selection does not replace the remembered document', async () => {
-  await open();
-  const file = join(temp, 'preferences', 'last-bridge.json');
-  const before = readFileSync(file, 'utf8');
-  await expect(optionsForTest().open(ctx({ runtimeFile: join(temp, 'missing.json') }))).rejects.toMatchObject({ code: 'drawio_runtime_invalid' });
+test('failed explicit selection does not replace the open binding', async () => {
+  const options = await open();
+  await expect(options.open(ctx({ runtimeFile: join(temp, 'missing.json') }))).rejects.toMatchObject({ code: 'drawio_runtime_invalid' });
+  expect(await action(options, 'read_document')(ctx({}))).toEqual(state);
   state.filename = join(temp, 'unexpected.drawio.svg');
-  await expect(optionsForTest().open(ctx({ runtimeFile }))).rejects.toMatchObject({ code: 'drawio_document_changed' });
-  expect(readFileSync(file, 'utf8')).toBe(before);
-  expect(operationRequests).toBe(0);
-});
-
-test('missing runtime and invalid preferences require explicit repair', async () => {
-  await open();
-  rmSync(runtimeFile);
-  await expect(optionsForTest().open(ctx())).rejects.toMatchObject({ code: 'drawio_runtime_invalid' });
-  const file = join(temp, 'preferences', 'last-bridge.json');
-  for (const content of ['not json', JSON.stringify({ runtimeFile: 'relative', filename }), ' '.repeat(4097)]) {
-    writeFileSync(file, content);
-    await expect(optionsForTest().open(ctx())).rejects.toMatchObject({ code: 'drawio_preferences_invalid' });
-  }
+  await expect(options.open(ctx({ runtimeFile }))).rejects.toMatchObject({ code: 'drawio_document_changed' });
+  state.filename = filename;
+  expect(await action(options, 'read_document')(ctx({}))).toEqual(state);
   expect(operationRequests).toBe(0);
 });
 
@@ -163,10 +179,10 @@ test('rehydration reloads runtime credentials and port rather than persisting th
   const options = optionsForTest();
   await options.open(ctx());
   expect(await action(options, 'read_document')(ctx({}))).toEqual(state);
-  expect(readFileSync(join(temp, 'preferences', 'last-bridge.json'), 'utf8')).not.toContain(token);
+  expect(JSON.stringify(await options.open(ctx()))).not.toContain(token);
 });
 
-test('closing then opening without input preserves the remembered selection', async () => {
+test('closing then opening without input returns to the session drawing', async () => {
   const options = await open();
   options.onClose(ctx());
   await options.open(ctx());

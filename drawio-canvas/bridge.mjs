@@ -3,9 +3,10 @@ import { isAbsolute } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 export class BridgeError extends Error {
-  constructor(code, message) {
+  constructor(code, message, status) {
     super(message);
     this.code = code;
+    this.status = status;
   }
 }
 
@@ -39,10 +40,10 @@ export async function request(runtime, endpoint, body) {
   }
   let result;
   try { result = await response.json(); }
-  catch { throw new BridgeError("drawio_response_invalid", "The local diagram bridge returned an invalid response."); }
+  catch { throw new BridgeError("drawio_response_invalid", "The local diagram bridge returned an invalid response.", response.status); }
   if (!response.ok) {
     const message = typeof result.error === "string" ? result.error.replaceAll(runtime.token, "[redacted]") : "Diagram bridge request failed.";
-    throw new BridgeError(response.status === 409 ? "drawio_conflict" : "drawio_request_failed", message);
+    throw new BridgeError(response.status === 409 ? "drawio_conflict" : "drawio_request_failed", message, response.status);
   }
   return result;
 }

@@ -74,6 +74,10 @@ function canonical(node: any): any {
     Array.from(node.childNodes, canonical).filter(x => x !== null)];
 }
 
+export function documentContent(xml: string) {
+  return JSON.stringify(canonical(parse(diagramXml(xml)).documentElement));
+}
+
 export function topology(xml: string) {
   const doc = parse(diagramXml(xml));
   return JSON.stringify(Array.from(doc.getElementsByTagName('diagram'), page => {
