@@ -46,13 +46,18 @@ export function canvasOptions(CanvasError, { bridges = new SessionBridges() } = 
     description: "Create and edit local draw.io diagrams with exact local shapes, progressive saved stages and protected manual layout.",
     inputSchema: {
       type: ["object", "null"], additionalProperties: false,
-      properties: { runtimeFile: { type: "string", minLength: 1, description: "Optional absolute runtime JSON path for an explicitly shared diagram. Omit to initialise or reopen this session's own drawing; do not send credentials." } },
+      properties: { runtimeFile: { type: "string", minLength: 1, description: "Optional absolute runtime JSON path for an explicitly shared diagram. Omit to preserve an open panel's selection or initialise this session's own drawing; do not send credentials." } },
     },
     open: handle(async ctx => {
-      const runtimeFile = ctx.input?.runtimeFile ?? await bridges.runtimeFile(ctx.sessionId);
+      const binding = bindings.get(key(ctx));
+      const explicitRuntimeFile = ctx.input?.runtimeFile;
+      const runtimeFile = explicitRuntimeFile ?? (binding?.shared ? binding.runtimeFile : await bridges.runtimeFile(ctx.sessionId));
       const runtime = readRuntime(runtimeFile);
+      if (explicitRuntimeFile === undefined && binding && runtime.filename !== binding.filename) {
+        throw new BridgeError("drawio_document_changed", "The bridge now points to another diagram. Reopen the canvas explicitly.");
+      }
       await readDocument(runtime);
-      bindings.set(key(ctx), { runtimeFile, filename: runtime.filename });
+      bindings.set(key(ctx), { runtimeFile, filename: runtime.filename, shared: explicitRuntimeFile !== undefined || binding?.shared === true });
       return { url: `${runtime.url}/`, title: basename(runtime.filename), status: "ready" };
     }),
     actions: [

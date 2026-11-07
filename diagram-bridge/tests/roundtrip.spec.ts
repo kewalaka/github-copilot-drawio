@@ -79,6 +79,32 @@ test('Node HTTP boundary rejects foreign hosts, origins, unauthenticated request
   expect((await fetch(bridge.url + '/health')).status).toBe(200);
 });
 
+test('production Node rejects unauthorized uploads before their bodies finish', async ({ bridge }) => {
+  const original = readFileSync(bridge.filename, 'utf8');
+  for (const framing of [{ 'Content-Length': '24000000' }, { 'Transfer-Encoding': 'chunked' }]) {
+    for (const [headers, expected] of [
+      [{}, 401],
+      [{ Authorization: `Bearer ${bridge.token}`, Origin: 'https://example.com' }, 403],
+    ] as const) {
+      const result = await new Promise<{ status: number | undefined; uploadFinished: boolean }>((resolve, reject) => {
+        const request = httpRequest(bridge.url + '/api/draft', { method: 'POST', headers: { ...headers, ...framing } }, response => {
+          const uploadFinished = request.writableEnded;
+          response.resume();
+          response.once('end', () => { clearTimeout(timeout); resolve({ status: response.statusCode, uploadFinished }); request.destroy(); });
+          response.once('error', reject);
+        });
+        const timeout = setTimeout(() => { reject(new Error('Rejection waited for the upload body')); request.destroy(); }, 5_000);
+        request.once('error', error => { clearTimeout(timeout); reject(error); });
+        request.write(Buffer.alloc(1024, 32));
+      });
+      expect(result.status).toBe(expected);
+      expect(result.uploadFinished).toBe(false);
+    }
+  }
+  expect((await fetch(bridge.url + '/health')).status).toBe(200);
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(original);
+});
+
 test('Node HTTP boundary caps both declared and chunked request bodies without losing the bridge', async ({ bridge }) => {
   const headers = { Authorization: `Bearer ${bridge.token}` };
   expect((await fetch(bridge.url + '/api/editor', {

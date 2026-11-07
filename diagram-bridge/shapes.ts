@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { BridgeError } from './model';
 
@@ -52,16 +52,46 @@ export function buildShapeIndex(assets: string) {
   }
 }
 
+function assetSnapshot(assets: string) {
+  const entries: string[] = [];
+  const record = (path: string) => {
+    const stat = statSync(join(assets, path), { bigint: true });
+    entries.push(JSON.stringify([path, ...[stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String)]));
+  };
+  try {
+    record('js/app.min.js');
+    record('js/grapheditor/Sidebar.js');
+    function images(directory: string) {
+      record(directory);
+      for (const entry of readdirSync(join(assets, directory), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const path = directory + '/' + entry.name;
+        if (entry.isDirectory()) images(path);
+        else if (entry.isFile() && entry.name.endsWith('.svg')) record(path);
+      }
+    }
+    images('img/lib');
+    return entries.join('\n');
+  } catch {
+    throw new BridgeError('Shape lookup needs the pinned local draw.io assets, including palette sources and SVG libraries.', 503);
+  }
+}
+
 export function createShapeSearch(assets: string) {
+  let cached: { snapshot: string; index: ReturnType<typeof buildShapeIndex>; fields: { shape: Shape; label: string; text: string }[] } | undefined;
   return (input: { query: string; limit?: number }) => {
     if (!input || Object.keys(input).some(key => !['query', 'limit'].includes(key)) || typeof input.query !== 'string' || !words(input.query) || input.query.length > 100 ||
         (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 50))) throw new BridgeError('Provide a shape query (1–100 characters) and limit (1–50).');
-    const index = buildShapeIndex(assets);
-    const terms = words(input.query).split(' ');
-    const ranked = index.shapes.map(shape => {
-      const label = words(shape.label);
-      const text = words(shape.id + ' ' + shape.category + ' ' + shape.label);
-      const score = terms.every(term => text.includes(term)) ? terms.reduce((n, term) => n + (label.includes(term) ? 2 : 1), 0) + (label === words(input.query) ? 10 : 0) : 0;
+    // Check metadata, not asset contents, on warm searches. Directory scans also detect additions and removals.
+    const snapshot = assetSnapshot(assets);
+    if (!cached || cached.snapshot !== snapshot) {
+      const index = buildShapeIndex(assets);
+      cached = { snapshot, index, fields: index.shapes.map(shape => ({ shape, label: words(shape.label), text: words(shape.id + ' ' + shape.category + ' ' + shape.label) })) };
+    }
+    const { index, fields } = cached;
+    const query = words(input.query);
+    const terms = query.split(' ');
+    const ranked = fields.map(({ shape, label, text }) => {
+      const score = terms.every(term => text.includes(term)) ? terms.reduce((n, term) => n + (label.includes(term) ? 2 : 1), 0) + (label === query ? 10 : 0) : 0;
       return { shape, score };
     }).filter(item => item.score).sort((a, b) => b.score - a.score || a.shape.id.localeCompare(b.shape.id));
     return { editorVersion: index.editorVersion, assetFingerprint: index.assetFingerprint, indexed: index.shapes.length, total: ranked.length,

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createServer } from 'node:http';
 import { SessionBridges } from './session-bridge.mjs';
 import { readRuntime, request } from './bridge.mjs';
 import { emptyDrawing } from '../diagram-bridge/empty';
@@ -220,6 +221,61 @@ test('concurrent reopen after an owned bridge closes creates only one replacemen
   expect(a).toBe(b);
   expect(readRuntime(a).url).not.toBe(previous.url);
   expect(bridges.services.size).toBe(1);
+});
+
+test('a reused port returning HTTP 401 restarts the session bridge without replacing its drawing', async () => {
+  const bridges = manager();
+  const runtimeFile = await bridges.runtimeFile('session-a');
+  const previous = readRuntime(runtimeFile);
+  const drawing = savedEmpty();
+  writeFileSync(previous.filename, drawing);
+  await bridges.services.get('session-a').close();
+  let requests = 0;
+  const otherBridge = createServer((_request, response) => {
+    requests++;
+    response.writeHead(401, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ error: `Authentication required ${previous.token}` }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    otherBridge.once('error', reject);
+    otherBridge.listen(Number(new URL(previous.url).port), '127.0.0.1', resolve);
+  });
+  try {
+    await expect(request(previous, 'document')).rejects.toMatchObject({
+      code: 'drawio_request_failed', status: 401, message: 'Authentication required [redacted]',
+    });
+    const [a, b] = await Promise.all([bridges.runtimeFile('session-a'), bridges.runtimeFile('session-a')]);
+    expect(a).toBe(runtimeFile);
+    expect(b).toBe(a);
+    expect(requests).toBe(2);
+    expect(readRuntime(a).url).not.toBe(previous.url);
+    expect(readRuntime(a).token).not.toBe(previous.token);
+    expect((await request(readRuntime(a), 'document')).filename).toBe(previous.filename);
+    expect(readFileSync(previous.filename, 'utf8')).toBe(drawing);
+    expect(bridges.services.size).toBe(1);
+  } finally { await new Promise<void>((resolve, reject) => otherBridge.close(error => error ? reject(error) : resolve())); }
+});
+
+test('HTTP conflicts and other request failures remain fatal when checking a saved runtime', async () => {
+  const bridges = manager({ loadRuntime: async () => filesystemRuntime() });
+  const directory = bridges.directory('session-a');
+  mkdirSync(directory, { recursive: true });
+  const runtimeFile = join(directory, 'runtime.json');
+  const filename = join(directory, 'architecture.drawio.svg');
+  const drawing = savedEmpty();
+  writeFileSync(filename, drawing);
+  let status = 409;
+  const conflictingBridge = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ error: 'Do not retry' }, { status }) });
+  const config = JSON.stringify({ url: `http://127.0.0.1:${conflictingBridge.port}`, token: 'a'.repeat(64), filename });
+  writeFileSync(runtimeFile, config);
+  try {
+    for (status of [409, 400, 403, 500]) {
+      await expect(bridges.runtimeFile('session-a')).rejects.toMatchObject({ code: status === 409 ? 'drawio_conflict' : 'drawio_request_failed', status });
+      expect(readFileSync(runtimeFile, 'utf8')).toBe(config);
+      expect(readFileSync(filename, 'utf8')).toBe(drawing);
+      expect(bridges.services.size).toBe(0);
+    }
+  } finally { await conflictingBridge.stop(true); }
 });
 
 test('stopping during asset preparation prevents startup and waits without creating a service', async () => {

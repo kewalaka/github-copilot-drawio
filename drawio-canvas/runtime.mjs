@@ -5700,7 +5700,7 @@ function emptyDrawing() {
 
 // diagram-bridge/shapes.ts
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 var editorVersion = "32.6.9";
 var words = (text) => text.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[^\p{L}\p{N}]+/gu, " ").trim().toLowerCase();
@@ -5759,16 +5759,47 @@ function buildShapeIndex(assets) {
     throw new BridgeError("Shape lookup needs the pinned local draw.io assets, including palette sources and SVG libraries.", 503);
   }
 }
+function assetSnapshot(assets) {
+  const entries = [];
+  const record = (path) => {
+    const stat = statSync(join(assets, path), { bigint: true });
+    entries.push(JSON.stringify([path, ...[stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String)]));
+  };
+  try {
+    let images = function(directory) {
+      record(directory);
+      for (const entry of readdirSync(join(assets, directory), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const path = directory + "/" + entry.name;
+        if (entry.isDirectory())
+          images(path);
+        else if (entry.isFile() && entry.name.endsWith(".svg"))
+          record(path);
+      }
+    };
+    record("js/app.min.js");
+    record("js/grapheditor/Sidebar.js");
+    images("img/lib");
+    return entries.join(`
+`);
+  } catch {
+    throw new BridgeError("Shape lookup needs the pinned local draw.io assets, including palette sources and SVG libraries.", 503);
+  }
+}
 function createShapeSearch(assets) {
+  let cached;
   return (input) => {
     if (!input || Object.keys(input).some((key) => !["query", "limit"].includes(key)) || typeof input.query !== "string" || !words(input.query) || input.query.length > 100 || input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 50))
       throw new BridgeError("Provide a shape query (1–100 characters) and limit (1–50).");
-    const index = buildShapeIndex(assets);
-    const terms = words(input.query).split(" ");
-    const ranked = index.shapes.map((shape) => {
-      const label = words(shape.label);
-      const text = words(shape.id + " " + shape.category + " " + shape.label);
-      const score = terms.every((term) => text.includes(term)) ? terms.reduce((n, term) => n + (label.includes(term) ? 2 : 1), 0) + (label === words(input.query) ? 10 : 0) : 0;
+    const snapshot = assetSnapshot(assets);
+    if (!cached || cached.snapshot !== snapshot) {
+      const index2 = buildShapeIndex(assets);
+      cached = { snapshot, index: index2, fields: index2.shapes.map((shape) => ({ shape, label: words(shape.label), text: words(shape.id + " " + shape.category + " " + shape.label) })) };
+    }
+    const { index, fields } = cached;
+    const query = words(input.query);
+    const terms = query.split(" ");
+    const ranked = fields.map(({ shape, label, text }) => {
+      const score = terms.every((term) => text.includes(term)) ? terms.reduce((n, term) => n + (label.includes(term) ? 2 : 1), 0) + (label === query ? 10 : 0) : 0;
       return { shape, score };
     }).filter((item) => item.score).sort((a, b) => b.score - a.score || a.shape.id.localeCompare(b.shape.id));
     return {
@@ -5784,7 +5815,7 @@ function createShapeSearch(assets) {
 
 // diagram-bridge/desktop.ts
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync as statSync2 } from "node:fs";
 import { delimiter, join as join2 } from "node:path";
 import { promisify } from "node:util";
 var execute = promisify(execFile);
@@ -5807,7 +5838,7 @@ function findExecutable(name) {
     const file = join2(directory, name);
     try {
       accessSync(file, process.platform === "win32" ? constants.F_OK : constants.X_OK);
-      if (statSync(file).isFile())
+      if (statSync2(file).isFile())
         return file;
     } catch {}
   }
@@ -5935,21 +5966,28 @@ async function startBridge(options) {
   }
   const csp = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'";
   let port = 0;
+  function admissionError(url2, headers) {
+    if (headers.get("host") !== `127.0.0.1:${port}`)
+      return json({ error: "Invalid host" }, 403);
+    if (url2.pathname.startsWith("/api/")) {
+      if (headers.get("authorization") !== `Bearer ${token}`)
+        return json({ error: "Authentication required" }, 401);
+      const origin = headers.get("origin");
+      if (origin && origin !== url2.origin)
+        return json({ error: "Invalid origin" }, 403);
+    }
+  }
   async function handle(request) {
     const url2 = new URL(request.url);
-    const host = `127.0.0.1:${port}`;
-    if (request.headers.get("host") !== host)
-      return json({ error: "Invalid host" }, 403);
+    const denied = admissionError(url2, request.headers);
+    if (denied)
+      return denied;
     try {
       releaseExpired();
       if (url2.pathname === "/health" && request.method === "GET")
         return json({ ok: true });
       if (url2.pathname.startsWith("/api/")) {
-        if (request.headers.get("authorization") !== `Bearer ${token}`)
-          throw new BridgeError("Authentication required", 401);
         const origin = request.headers.get("origin");
-        if (origin && origin !== url2.origin)
-          throw new BridgeError("Invalid origin", 403);
         if (request.method === "GET") {
           if (url2.pathname === "/api/document") {
             if (!paused)
@@ -6192,11 +6230,13 @@ async function startBridge(options) {
     }
   }
   const server = createServer(async (incoming, outgoing) => {
+    incoming.on("error", () => {});
     try {
       const origin = `http://127.0.0.1:${port}`;
       const url2 = new URL(incoming.url ?? "/", origin);
       let response;
       if (incoming.headers.host !== `127.0.0.1:${port}` || url2.origin !== origin) {
+        outgoing.shouldKeepAlive = false;
         incoming.resume();
         response = json({ error: "Invalid host" }, 403);
       } else {
@@ -6205,13 +6245,20 @@ async function startBridge(options) {
           if (value !== undefined)
             headers.set(name, Array.isArray(value) ? value.join(", ") : value);
         }
-        const hasBody = incoming.method !== "GET" && incoming.method !== "HEAD";
-        const body = hasBody ? await readBody(incoming) : undefined;
-        if (body === null) {
+        const denied = admissionError(url2, headers);
+        if (denied) {
           outgoing.shouldKeepAlive = false;
-          response = json({ error: "Request body exceeds 24 MB" }, 413);
+          incoming.resume();
+          response = denied;
         } else {
-          response = await handle(new Request(url2, { method: incoming.method, headers, body }));
+          const hasBody = incoming.method !== "GET" && incoming.method !== "HEAD";
+          const body = hasBody ? await readBody(incoming) : undefined;
+          if (body === null) {
+            outgoing.shouldKeepAlive = false;
+            response = json({ error: "Request body exceeds 24 MB" }, 413);
+          } else {
+            response = await handle(new Request(url2, { method: incoming.method, headers, body }));
+          }
         }
       }
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));

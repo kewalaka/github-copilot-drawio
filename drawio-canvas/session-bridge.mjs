@@ -62,7 +62,8 @@ export class SessionBridges {
         await verifyDocument(readRuntime(runtimeFile), filename);
         return runtimeFile;
       } catch (error) {
-        if (!["drawio_runtime_invalid", "drawio_bridge_unavailable"].includes(error.code)) throw error;
+        if (!["drawio_runtime_invalid", "drawio_bridge_unavailable"].includes(error.code) &&
+            !(error instanceof BridgeError && error.status === 401)) throw error;
       }
     }
     let runtime;

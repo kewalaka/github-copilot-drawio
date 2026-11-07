@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canvasOptions } from './drawio-canvas/canvas.mjs';
 
@@ -21,7 +20,7 @@ let jobFailure = false;
 const id = '123456789012345678901234';
 
 beforeEach(() => {
-  temp = mkdtempSync(join(tmpdir(), 'drawio-canvas-test-'));
+  temp = mkdtempSync(join(import.meta.dir, '.drawio-canvas-test-'));
   runtimeFile = join(temp, 'runtime.json');
   filename = join(temp, 'architecture.drawio.svg');
   token = 'a'.repeat(64);
@@ -101,6 +100,56 @@ test('supports omitted, empty and null input across panels and provider restarts
   expect(options.inputSchema.type).toEqual(['object', 'null']);
   expect(operationRequests).toBe(0);
   expect(state.revision).toBe(3);
+});
+
+test('no-input repeated shared opens preserve selection and drawing identity independently of defaults', async () => {
+  const defaultRuntimeFile = join(temp, 'default-runtime.json');
+  const defaultFilename = join(temp, 'default.drawio.svg');
+  const defaultState = { ...state, filename: defaultFilename, xml: '<default/>' };
+  const defaultServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json(defaultState) });
+  let defaultOpens = 0;
+  const options = canvasOptions(CanvasError, { bridges: { runtimeFile: async () => { defaultOpens++; return defaultRuntimeFile; } } });
+  writeFileSync(defaultRuntimeFile, JSON.stringify({ url: `http://127.0.0.1:${defaultServer.port}`, token, filename: defaultFilename }));
+  try {
+    const shared = await options.open(ctx({ runtimeFile }));
+    const defaults = await options.open(ctx(undefined, 'default-panel'));
+    expect(shared.url).not.toBe(defaults.url);
+    for (const input of [undefined, {}, null]) {
+      expect(await options.open(ctx(input))).toEqual(shared);
+      expect(await action(options, 'read_document')(ctx({}))).toEqual(state);
+      expect(await action(options, 'read_document')(ctx({}, 'default-panel'))).toEqual(defaultState);
+    }
+    expect(defaultOpens).toBe(1);
+    writeFileSync(runtimeFile, JSON.stringify({ url: `http://127.0.0.1:${defaultServer.port}`, token, filename: defaultFilename }));
+    await expect(options.open(ctx())).rejects.toMatchObject({ code: 'drawio_document_changed' });
+    writeFileSync(runtimeFile, JSON.stringify({ url: `http://127.0.0.1:${server.port}`, token, filename }));
+    state.filename = defaultFilename;
+    await expect(options.open(ctx())).rejects.toMatchObject({ code: 'drawio_document_changed' });
+    state.filename = filename;
+    expect(await options.open(ctx())).toEqual(shared);
+    options.onClose(ctx());
+    expect(await options.open(ctx())).toEqual(defaults);
+    expect(defaultOpens).toBe(2);
+  } finally { await defaultServer.stop(true); }
+});
+
+test('repeated default opens restart their session bridge and reload its runtime', async () => {
+  const replacement = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json(state) });
+  let opens = 0;
+  const options = canvasOptions(CanvasError, { bridges: { runtimeFile: async () => {
+    opens++;
+    if (opens > 1) writeFileSync(runtimeFile, JSON.stringify({ url: `http://127.0.0.1:${replacement.port}`, token, filename }));
+    return runtimeFile;
+  } } });
+  try {
+    const first = await options.open(ctx());
+    await server.stop(true);
+    const reopened = await options.open(ctx());
+    expect(opens).toBe(2);
+    expect(reopened.url).not.toBe(first.url);
+    expect(reopened.url).toBe(`http://127.0.0.1:${replacement.port}/`);
+    expect(await action(options, 'read_document')(ctx({}))).toEqual(state);
+  } finally { await replacement.stop(true); }
 });
 
 test('bindings are scoped by session as well as panel identity', async () => {

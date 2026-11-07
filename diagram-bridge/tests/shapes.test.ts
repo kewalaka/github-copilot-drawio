@@ -1,6 +1,6 @@
-import { beforeEach, afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { beforeEach, afterEach, expect, spyOn, test } from 'bun:test';
+import * as fs from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { buildShapeIndex, createShapeSearch, editorVersion } from '../shapes';
 import { canvasOptions } from '../../drawio-canvas/canvas.mjs';
@@ -9,7 +9,7 @@ import { guidanceOptions } from '../../drawio-canvas/guidance.mjs';
 let assets: string;
 const style = 'rounded=0;whiteSpace=wrap;html=1;';
 beforeEach(() => {
-  assets = mkdtempSync(join(tmpdir(), 'drawio-shapes-'));
+  assets = mkdtempSync(resolve(import.meta.dir, '.drawio-shapes-'));
   for (const directory of ['js/grapheditor', 'img/lib/example']) mkdirSync(join(assets, directory), { recursive: true });
   writeFileSync(join(assets, 'js/app.min.js'), `EditorUi.VERSION="${editorVersion}";`);
   writeFileSync(join(assets, 'js/grapheditor/Sidebar.js'), `Sidebar.prototype.addGeneralPalette = function() {this.createVertexTemplateEntry('${style}', 120, 60, '', 'Rectangle');this.addEntry('list group erd table', function(){});};`);
@@ -35,6 +35,65 @@ test('schema and handler bound local queries and result limits', () => {
   for (const input of [{ query: '' }, { query: '  ' }, { query: '!@' }, { query: 'x'.repeat(101) }, { query: 'test', limit: 0 }, { query: 'test', limit: 51 }, { query: 'test', limit: 1.5 }, { query: 'test', remote: true }, { query: 5 }, null]) {
     expect(() => search(input as any)).toThrow('Provide a shape query');
   }
+});
+
+test('reuses the parsed index and normalized search fields without reading unchanged asset contents', () => {
+  const search = createShapeSearch(assets);
+  const reads = spyOn(fs, 'readFileSync');
+  try {
+    const initial = search({ query: 'test service' });
+    expect(reads).toHaveBeenCalledTimes(3);
+    reads.mockClear();
+    const repeated = search({ query: 'EXAMPLE TestService' });
+    expect(repeated.shapes[0]).toBe(initial.shapes[0]);
+    expect(repeated.assetFingerprint).toBe(initial.assetFingerprint);
+    expect(search({ query: 'rectangle' }).shapes[0].style).toBe(style);
+    expect(search({ query: 'not an icon' }).shapes).toEqual([]);
+    expect(reads).not.toHaveBeenCalled();
+  } finally {
+    reads.mockRestore();
+  }
+});
+
+test('invalidates modified palette and SVG contents, even with restored mtime and unchanged size', () => {
+  const search = createShapeSearch(assets);
+  const initial = search({ query: 'rectangle' });
+  const palette = join(assets, 'js/grapheditor/Sidebar.js');
+  const original = statSync(palette);
+  writeFileSync(palette, readFileSync(palette, 'utf8').replace('120, 60', '160, 80'));
+  utimesSync(palette, original.atime, original.mtime);
+  const changed = search({ query: 'rectangle' });
+  expect(changed.assetFingerprint).not.toBe(initial.assetFingerprint);
+  expect(changed.shapes[0]).toMatchObject({ style, width: 160, height: 80 });
+  expect(changed.assetFingerprint).toBe(buildShapeIndex(assets).assetFingerprint);
+
+  const image = join(assets, 'img/lib/example/Test_Service.svg');
+  const imageStat = statSync(image);
+  writeFileSync(image, readFileSync(image, 'utf8').replace('20 10', '10 20'));
+  utimesSync(image, imageStat.atime, imageStat.mtime);
+  const changedImage = search({ query: 'test' });
+  expect(changedImage.assetFingerprint).not.toBe(changed.assetFingerprint);
+  expect(changedImage.shapes[0]).toMatchObject({ width: 32, height: 64 });
+  expect(changedImage.assetFingerprint).toBe(buildShapeIndex(assets).assetFingerprint);
+});
+
+test('invalidates added and removed SVG files and nested library directories', () => {
+  const search = createShapeSearch(assets);
+  const initial = search({ query: 'test' });
+  mkdirSync(join(assets, 'img/lib/nested/services'), { recursive: true });
+  writeFileSync(join(assets, 'img/lib/nested/services/New_Service.svg'), '<svg viewBox="0 0 1 1"/>');
+  const added = search({ query: 'new service' });
+  expect(added).toMatchObject({ indexed: 3, total: 1 });
+  expect(added.shapes[0]).toMatchObject({ category: 'nested/services', label: 'New Service' });
+  expect(added.assetFingerprint).toBe(buildShapeIndex(assets).assetFingerprint);
+  expect(added.assetFingerprint).not.toBe(initial.assetFingerprint);
+  rmSync(join(assets, 'img/lib/nested'), { recursive: true });
+  const removed = search({ query: 'new service' });
+  expect(removed).toMatchObject({ indexed: 2, total: 0, assetFingerprint: initial.assetFingerprint });
+  writeFileSync(join(assets, 'img/lib/example/Another.svg'), '<svg viewBox="0 0 1 1"/>');
+  expect(search({ query: 'another' }).shapes).toHaveLength(1);
+  rmSync(join(assets, 'img/lib/example/Another.svg'));
+  expect(search({ query: 'another' }).shapes).toEqual([]);
 });
 
 test('detects missing/mismatched assets instead of serving a stale index', () => {
