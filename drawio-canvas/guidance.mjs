@@ -10,8 +10,9 @@ export function guidanceOptions() {
       parameters: { type: "object", additionalProperties: false, properties: {} },
       handler: async () => ({ textResultForLlm: drawioGuidance(), resultType: "success" }),
     }],
-    hooks: {
-      onSessionStart: async () => ({ additionalContext: "For draw.io work, call drawio_get_guidance before editing. The drawio-architecture canvas offers local search_shapes and save-confirmed apply_operations. Build complex drawings in meaningful stages, awaiting each save; preserve manual layout and reassess conflicts." }),
+    systemMessage: {
+      mode: "append",
+      content: "For draw.io work, call drawio_get_guidance before editing. The drawio-architecture canvas offers local search_shapes and save-confirmed apply_operations. Build complex drawings in meaningful stages, awaiting each save; preserve manual layout and reassess conflicts.",
     },
   };
 }

@@ -1,13 +1,16 @@
 import { test as base, expect, type Page } from '@playwright/test';
 import { spawn } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
 import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { diagramXml, parse, topology } from '../model';
+import { applyOperations, diagramXml, parse, topology } from '../model';
 import { canvasOptions } from '../../drawio-canvas/canvas.mjs';
 import { seed } from '../seed';
 
 type Runtime = { url: string; token: string; filename: string };
+const nodeExecutable = process.versions.bun ? Bun.which('node') : process.execPath;
+if (!nodeExecutable) throw new Error('Node is needed for development browser tests');
 const test = base.extend<{ bridge: Runtime & { restart: () => Promise<Runtime>; runtimePath: string; temp: string } }>({
   bridge: async ({}, use) => {
     const temp = mkdtempSync(join(tmpdir(), 'diagram-bridge-test-'));
@@ -22,8 +25,18 @@ const test = base.extend<{ bridge: Runtime & { restart: () => Promise<Runtime>; 
     }
     async function start(): Promise<Runtime> {
       rmSync(runtimePath, { force: true });
-      child = spawn('bun', ['run', 'server.ts'], {
-        cwd: import.meta.dirname + '/..', env: { ...process.env, DIAGRAM_FILE: join(temp, 'test.drawio.svg'), BRIDGE_RUNTIME: runtimePath, PORT: '0' },
+      child = spawn(nodeExecutable, ['--input-type=module', '--eval', `
+        import { resolve } from 'node:path';
+        import { startBridge } from '../drawio-canvas/runtime.mjs';
+        if (process.versions.bun) throw new Error('Production bridge must run in Node');
+        await startBridge({
+          filename: process.env.DIAGRAM_FILE,
+          runtimeFile: process.env.BRIDGE_RUNTIME,
+          assets: process.env.DRAWIO_ASSETS ?? resolve('vendor/drawio'),
+          port: 0,
+        });
+      `], {
+        cwd: import.meta.dirname + '/..', env: { ...process.env, PATH: '', DIAGRAM_FILE: join(temp, 'test.drawio.svg'), BRIDGE_RUNTIME: runtimePath },
         stdio: 'pipe',
       });
       let output = '';
@@ -40,6 +53,52 @@ const test = base.extend<{ bridge: Runtime & { restart: () => Promise<Runtime>; 
     }
   },
 });
+test('Node HTTP boundary rejects foreign hosts, origins, unauthenticated requests and private asset paths', async ({ bridge }) => {
+  const foreignHostStatus = await new Promise<number | undefined>((resolve, reject) => {
+    const request = httpRequest(bridge.url + '/health', { headers: { Host: 'localhost' } }, response => {
+      response.resume();
+      response.once('end', () => resolve(response.statusCode));
+    });
+    request.once('error', reject);
+    request.end();
+  });
+  expect(foreignHostStatus).toBe(403);
+  expect((await fetch(bridge.url + '/api/document')).status).toBe(401);
+  expect((await fetch(bridge.url + '/api/editor', {
+    method: 'POST', headers: { Authorization: `Bearer ${bridge.token}`, Origin: 'http://localhost' },
+    body: JSON.stringify({ editorId: 'foreign-origin' }),
+  })).status).toBe(403);
+  expect((await fetch(bridge.url + '/api/editor', {
+    method: 'POST', headers: { Authorization: `Bearer ${bridge.token}` }, body: '{',
+  })).status).toBe(400);
+  for (const path of ['/drawio/WEB-INF/web.xml', '/drawio/META-INF/MANIFEST.MF', '/drawio/%2e%2e%2fprivate']) {
+    expect((await fetch(bridge.url + path)).status).toBe(403);
+  }
+  expect((await fetch(bridge.url + '/does-not-exist')).status).toBe(404);
+  expect((await fetch(bridge.url + '/style.css')).headers.get('content-type')).toBe('text/css');
+  expect((await fetch(bridge.url + '/health')).status).toBe(200);
+});
+
+test('Node HTTP boundary caps both declared and chunked request bodies without losing the bridge', async ({ bridge }) => {
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  expect((await fetch(bridge.url + '/api/editor', {
+    method: 'POST', headers, body: Buffer.alloc(24_000_001, 32),
+  })).status).toBe(413);
+  const status = await new Promise<number | undefined>((resolve, reject) => {
+    const request = httpRequest(bridge.url + '/api/editor', {
+      method: 'POST', headers: { ...headers, 'Transfer-Encoding': 'chunked' },
+    }, response => {
+      response.resume();
+      response.once('end', () => resolve(response.statusCode));
+    });
+    request.once('error', reject);
+    request.write(Buffer.alloc(12_000_000, 32));
+    request.end(Buffer.alloc(12_000_001, 32));
+  });
+  expect(status).toBe(413);
+  expect((await fetch(bridge.url + '/health')).status).toBe(200);
+});
+
 const geometry = (xml: string, id: string) => {
   const cell = Array.from(parse(diagramXml(xml)).getElementsByTagName('mxCell')).find(c => c.getAttribute('id') === id)!;
   return cell.getElementsByTagName('mxGeometry')[0].toString();
@@ -381,4 +440,165 @@ test('local shape lookup supports progressive saved stages; later conflicts/fail
   await expect(page.frameLocator('#editor').getByText('Service calls', { exact: true }).filter({ visible: true }).first()).toBeVisible();
   expect(readFileSync(bridge.filename, 'utf8')).toBe(savedSvg);
   expect(external).toEqual([]);
+});
+
+function externalEdit(svg: string) {
+  const document = parse(svg);
+  document.documentElement.setAttribute('content', applyOperations(diagramXml(svg), [
+    { kind: 'update', id: 'function', label: 'Desktop-edited Function App', geometry: { x: 150, y: 110, width: 66, height: 66 } },
+  ], true));
+  return document.toString();
+}
+
+test('desktop handoff pauses saving, rejects unsafe external edits and resumes the same file', async ({ page, request, bridge }) => {
+  await page.route('**/api/open-desktop', route => route.fulfill({ json: { opened: true } }));
+  await page.goto(bridge.url);
+  await expect(page.locator('#open-drawio')).toBeEnabled({ timeout: 30_000 });
+  await page.locator('#open-drawio').click();
+  await expect(page.locator('#status')).toContainText('Opened in draw.io desktop');
+  await expect(page.locator('#save')).toBeDisabled();
+  await expect(page.locator('#resume')).toBeEnabled();
+  expect(await page.locator('#editor').evaluate(frame => frame.inert)).toBe(true);
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  const read = async () => (await request.get(bridge.url + '/api/document', { headers })).json();
+  const initial = await read();
+  expect(initial.paused).toBe(true);
+  expect(existsSync(bridge.filename + '.handoff')).toBe(true);
+  const saved = readFileSync(bridge.filename, 'utf8');
+  const editorId = await page.evaluate(() => sessionStorage.bridgeEditorId);
+  expect((await request.post(bridge.url + '/api/save', { headers, data: { editorId, expectedRevision: initial.revision, svg: saved } })).status()).toBe(409);
+  expect((await request.post(bridge.url + '/api/operations', { headers, data: { expectedRevision: initial.revision, operations: [] } })).status()).toBe(409);
+  expect((await request.post(bridge.url + '/api/open-desktop', { data: { editorId } })).status()).toBe(401);
+  expect((await request.post(bridge.url + '/api/open-desktop', { headers, data: { editorId } })).status()).toBe(403);
+  await page.frameLocator('#editor').locator('body').evaluate(() => parent.postMessage(JSON.stringify({ event: 'autosave', xml: '<mxfile/>' }), location.origin));
+  await page.waitForTimeout(1000);
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(saved);
+  const invalid = saved.replace('</svg>', '<script>throw new Error("invalid external SVG")</script></svg>');
+  writeFileSync(bridge.filename, invalid);
+  const rejected = page.waitForResponse(response => response.url().endsWith('/api/editor'));
+  await page.locator('#resume').click();
+  expect((await rejected).status()).toBe(400);
+  await expect(page.locator('#status')).toHaveClass('error');
+  expect((await read()).paused).toBe(true);
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(invalid);
+  const external = externalEdit(saved);
+  writeFileSync(bridge.filename, external);
+  await page.locator('#resume').click();
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  await expect(page.frameLocator('#editor').getByText('Desktop-edited Function App', { exact: true })).toBeVisible();
+  const resumed = await read();
+  expect(resumed).toMatchObject({ paused: false, dirty: false, revision: initial.revision + 1 });
+  expect(geometry(resumed.xml, 'function')).toBe(geometry(diagramXml(external), 'function'));
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(external);
+  expect(existsSync(bridge.filename + '.handoff')).toBe(false);
+  await expect(page.locator('#resume')).toBeHidden();
+});
+
+test('desktop pause survives bridge restart without reopening a competing editor', async ({ page, request, bridge }) => {
+  await page.route('**/api/open-desktop', route => route.fulfill({ json: { opened: true } }));
+  await page.goto(bridge.url);
+  await expect(page.locator('#open-drawio')).toBeEnabled({ timeout: 30_000 });
+  await page.locator('#open-drawio').click();
+  await expect(page.locator('#status')).toContainText('Opened in draw.io desktop');
+  const external = externalEdit(readFileSync(bridge.filename, 'utf8'));
+  writeFileSync(bridge.filename, external);
+  const restarted = await bridge.restart();
+  await page.goto(restarted.url);
+  await expect(page.locator('#resume')).toBeEnabled();
+  expect(await page.locator('#editor').getAttribute('src')).toBe(null);
+  expect((await (await request.get(restarted.url + '/api/document', { headers: { Authorization: `Bearer ${restarted.token}` } })).json()).paused).toBe(true);
+  await page.locator('#resume').click();
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  await expect(page.frameLocator('#editor').getByText('Desktop-edited Function App', { exact: true })).toBeVisible();
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(external);
+});
+
+test('browser fallback transfers a single lease and preview is a read-only button', async ({ page, context, request, bridge }) => {
+  await page.route('**/api/open-desktop', route => route.fulfill({ json: { opened: false } }));
+  await page.goto(bridge.url);
+  await expect(page.locator('#open-drawio')).toBeEnabled({ timeout: 30_000 });
+  const browserOpened = context.waitForEvent('page');
+  await page.locator('#open-drawio').click();
+  const browser = await browserOpened;
+  await expect(browser.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  expect(browser.url()).toBe(bridge.url + '/');
+  expect(await browser.evaluate(() => sessionStorage.bridgeEditorId)).not.toBe(await page.evaluate(() => sessionStorage.bridgeEditorId));
+  await expect(page.locator('#save')).toBeDisabled();
+  await page.locator('#resume').click();
+  await expect(page.locator('#status')).toContainText('open in another editor');
+  await expect(page.locator('#save')).toBeDisabled();
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  const read = async () => (await request.get(bridge.url + '/api/document', { headers })).json();
+  const initial = await read();
+  await dragFunction(browser);
+  await expect.poll(async () => geometry((await read()).xml, 'function')).not.toBe(geometry(initial.xml, 'function'));
+  await expect.poll(async () => !(await read()).dirty).toBeTruthy();
+  const edited = await read();
+  const saved = readFileSync(bridge.filename, 'utf8');
+  expect(await browser.locator('#preview').evaluate(element => element.tagName)).toBe('BUTTON');
+  const previewOpened = context.waitForEvent('page');
+  await browser.locator('#preview').click();
+  const preview = await previewOpened;
+  await preview.waitForLoadState();
+  expect(preview.url()).toBe(bridge.url + '/diagram.svg');
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(saved);
+  await preview.close();
+  await Promise.all([browser.waitForEvent('close'), browser.close({ runBeforeUnload: true })]);
+  await expect.poll(async () => {
+    const response = page.waitForResponse(response => response.url().endsWith('/api/editor'));
+    await page.locator('#resume').click();
+    return (await response).status();
+  }, { timeout: 3000, intervals: [100] }).toBe(200);
+  await expect(page.locator('#status')).toContainText('Saved', { timeout: 30_000 });
+  expect(geometry((await read()).xml, 'function')).toBe(geometry(edited.xml, 'function'));
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(saved);
+});
+
+test('editor close releases only its current lease and never changes the saved drawing', async ({ request, bridge }) => {
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  const post = (path: string, data: object) => request.post(bridge.url + '/api/' + path, { headers, data });
+  const saved = readFileSync(bridge.filename, 'utf8');
+  const first = await (await post('editor', { editorId: 'original' })).json();
+  const closing = { editorId: 'original', editorLease: first.editorLease };
+  expect((await request.post(bridge.url + '/api/editor/release', { data: closing })).status()).toBe(401);
+  expect((await request.post(bridge.url + '/api/editor/release', { headers: { ...headers, Origin: 'https://example.com' }, data: closing })).status()).toBe(403);
+  for (const invalid of [{ editorId: 'other', editorLease: first.editorLease }, { editorId: 'original' }, { editorId: 'original', editorLease: 'wrong' }]) {
+    expect(await (await post('editor/release', invalid)).json()).toEqual({ released: false });
+  }
+  expect((await post('editor', { editorId: 'replacement' })).status()).toBe(409);
+  const refreshed = await (await post('editor', { editorId: 'original' })).json();
+  expect(refreshed.editorLease).not.toBe(first.editorLease);
+  expect(await (await post('editor/release', closing)).json()).toEqual({ released: false });
+  expect((await post('editor', { editorId: 'replacement' })).status()).toBe(409);
+  expect(await (await post('editor/release', { editorId: 'original', editorLease: refreshed.editorLease })).json()).toEqual({ released: true });
+  expect(await (await post('editor/release', { editorId: 'original', editorLease: refreshed.editorLease })).json()).toEqual({ released: false });
+  expect((await post('editor', { editorId: 'replacement' })).status()).toBe(200);
+  expect(await (await post('editor/release', closing)).json()).toEqual({ released: false });
+  expect((await post('editor', { editorId: 'original' })).status()).toBe(409);
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(saved);
+});
+
+test('a crashed editor still expires when no close notification or heartbeat arrives', async ({ request, bridge }) => {
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  const claim = (editorId: string) => request.post(bridge.url + '/api/editor', { headers, data: { editorId } });
+  const saved = readFileSync(bridge.filename, 'utf8');
+  expect((await claim('crashed')).status()).toBe(200);
+  expect((await claim('replacement')).status()).toBe(409);
+  await expect.poll(async () => (await claim('replacement')).status(), { timeout: 18_000, intervals: [1000] }).toBe(200);
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(saved);
+});
+
+test('handoff rejects stale revisions, unsaved drafts and pending operations without changing the SVG', async ({ request, bridge }) => {
+  const headers = { Authorization: `Bearer ${bridge.token}` };
+  const post = (path: string, data: object) => request.post(bridge.url + '/api/' + path, { headers, data: { ...data, editorId: 'handoff-test' } });
+  const initial = await (await post('editor', {})).json();
+  const saved = readFileSync(bridge.filename, 'utf8');
+  expect((await post('handoff', { expectedRevision: initial.revision - 1 })).status()).toBe(409);
+  expect((await post('operations', { expectedRevision: initial.revision, operations: [{ kind: 'update', id: 'function', label: 'Pending edit' }] })).status()).toBe(202);
+  expect((await post('handoff', { expectedRevision: initial.revision })).status()).toBe(409);
+  const draft = await (await post('draft', { expectedRevision: initial.revision, xml: applyOperations(initial.xml, [{ kind: 'update', id: 'function', label: 'Unsaved draft' }]) })).json();
+  expect(draft.dirty).toBe(true);
+  expect((await post('handoff', { expectedRevision: draft.revision })).status()).toBe(409);
+  expect(existsSync(bridge.filename + '.handoff')).toBe(false);
+  expect(readFileSync(bridge.filename, 'utf8')).toBe(saved);
 });

@@ -4,9 +4,15 @@ import { SessionBridges } from "./session-bridge.mjs";
 import { guidanceOptions } from "./guidance.mjs";
 
 const bridges = new SessionBridges();
-process.once("exit", () => bridges.stop());
+let shuttingDown = false;
 for (const signal of ["SIGTERM", "SIGINT"]) {
-  process.once(signal, () => { bridges.stop(); process.exit(0); });
+  process.once(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try { await bridges.stop(); }
+    finally { process.exit(0); }
+  });
 }
 const canvas = createCanvas(canvasOptions(CanvasError, { bridges }));
-await joinSession({ canvases: [canvas], ...guidanceOptions() });
+try { await joinSession({ canvases: [canvas], ...guidanceOptions() }); }
+catch (error) { await bridges.stop(); throw error; }

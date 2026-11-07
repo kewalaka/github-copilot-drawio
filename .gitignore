@@ -8,6 +8,8 @@ last-bridge.json
 .env.*
 *.drawio
 *.drawio.svg
+*.drawio.svg.handoff
+.install-test-*/
 *.drawio.png
 diagrams/
 playwright-report/

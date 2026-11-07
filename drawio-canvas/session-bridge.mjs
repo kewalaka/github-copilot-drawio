@@ -1,12 +1,18 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { setTimeout as sleep } from "node:timers/promises";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { readRuntime, request, BridgeError } from "./bridge.mjs";
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
+const repairInstallation = "Install this repository's complete drawio-canvas folder using Copilot's Install extension from repository action, then restart Copilot after saving open drawings.";
+const storageError = () => new BridgeError("drawio_storage_unavailable", "This session's drawing storage is inaccessible or a drawing/runtime path is not a regular file. Check COPILOT_HOME and the session's files/diagram-bridge directory; restore read/write access without making private files public, then reopen the canvas. Existing drawings have not been replaced.");
+const stoppedError = () => new BridgeError("drawio_bridge_unavailable", "This diagram provider is shutting down. Reopen the canvas after Copilot restarts.");
+
+function readableFile(filename) {
+  if (!statSync(filename).isFile()) throw new Error();
+  accessSync(filename, constants.R_OK);
+}
 
 async function verifyDocument(runtime, filename) {
   if (runtime.filename !== filename || (await request(runtime, "document")).filename !== filename) {
@@ -15,40 +21,36 @@ async function verifyDocument(runtime, filename) {
 }
 
 export class SessionBridges {
-  constructor({ home = process.env.COPILOT_HOME || join(homedir(), ".copilot"), bun = "bun",
-    bridgeDir = join(extensionDir, "bridge"), assetsDir = join(extensionDir, "artifacts", "vendor", "drawio") } = {}) {
+  constructor({ home = process.env.COPILOT_HOME || join(homedir(), ".copilot"),
+    runtimePath = join(extensionDir, "runtime.mjs"), assetsDir = join(extensionDir, "artifacts", "vendor", "drawio"),
+    sourceAssets = process.env.DRAWIO_ASSETS, loadRuntime } = {}) {
     this.home = home;
-    this.bun = bun;
-    this.bridgeDir = bridgeDir;
+    this.runtimePath = runtimePath;
     this.assetsDir = assetsDir;
+    this.sourceAssets = sourceAssets;
+    this.loadRuntime = loadRuntime;
     this.sessions = new Map();
-    this.children = new Set();
+    this.services = new Map();
+    this.stopping = false;
   }
 
   directory(sessionId) {
     if (typeof sessionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sessionId)) {
       throw new BridgeError("drawio_session_invalid", "A valid session ID is required for separate diagram storage.");
     }
+    if (typeof this.home !== "string" || !isAbsolute(this.home)) throw storageError();
     return join(this.home, "session-state", sessionId, "files", "diagram-bridge");
   }
 
   async runtimeFile(sessionId) {
+    if (this.stopping) throw stoppedError();
     let pending = this.sessions.get(sessionId);
-    if (pending) {
-      const runtimeFile = await pending;
-      try {
-        await verifyDocument(readRuntime(runtimeFile), join(this.directory(sessionId), "architecture.drawio.svg"));
-        return runtimeFile;
-      }
-      catch (error) {
-        if (!["drawio_bridge_unavailable", "drawio_runtime_invalid"].includes(error.code)) throw error;
-        this.sessions.delete(sessionId);
-      }
+    if (!pending) {
+      pending = this.start(sessionId);
+      this.sessions.set(sessionId, pending);
     }
-    pending = this.start(sessionId);
-    this.sessions.set(sessionId, pending);
     try { return await pending; }
-    catch (error) { this.sessions.delete(sessionId); throw error; }
+    finally { if (this.sessions.get(sessionId) === pending) this.sessions.delete(sessionId); }
   }
 
   async start(sessionId) {
@@ -63,40 +65,68 @@ export class SessionBridges {
         if (!["drawio_runtime_invalid", "drawio_bridge_unavailable"].includes(error.code)) throw error;
       }
     }
-    if (!existsSync(join(this.assetsDir, "index.html"))) {
-      throw new BridgeError("drawio_assets_missing", "Install the local draw.io assets under this extension's artifacts/vendor/drawio directory.");
+    let runtime;
+    try {
+      if (this.loadRuntime) runtime = await this.loadRuntime();
+      else {
+        if (typeof this.runtimePath !== "string" || !isAbsolute(this.runtimePath)) throw new Error();
+        readableFile(this.runtimePath);
+        runtime = await import(pathToFileURL(this.runtimePath).href);
+      }
+      if (typeof runtime.startBridge !== "function" || typeof runtime.ensureAssets !== "function") throw new Error();
+    } catch {
+      throw new BridgeError("drawio_install_incomplete", `The bundled diagram runtime is missing, unreadable or incomplete. Check the configured runtime file; wrapper-only installs are incomplete. ${repairInstallation}`);
     }
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const child = spawn(this.bun, [join(this.bridgeDir, "server.ts")], {
-      cwd: this.bridgeDir,
-      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
-        DIAGRAM_FILE: filename, BRIDGE_RUNTIME: runtimeFile, DRAWIO_ASSETS: this.assetsDir, PORT: "0" },
-      stdio: "ignore",
-    });
-    this.children.add(child);
-    let failed = false;
-    child.once("error", () => { failed = true; this.children.delete(child); });
-    child.once("exit", () => this.children.delete(child));
-    for (let attempt = 0; attempt < 100 && !failed && child.exitCode === null && child.signalCode === null; attempt++) {
-      await sleep(50);
-      try {
-        const runtime = readRuntime(runtimeFile);
-        if (runtime.filename === filename) {
-          await verifyDocument(runtime, filename);
-          return runtimeFile;
-        }
-      } catch (error) {
-        if (!["drawio_runtime_invalid", "drawio_bridge_unavailable"].includes(error.code)) {
-          child.kill("SIGTERM");
-          throw error;
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      accessSync(directory, constants.R_OK | constants.W_OK | constants.X_OK);
+      for (const file of [filename, runtimeFile]) {
+        if (existsSync(file)) {
+          readableFile(file);
+          accessSync(file, constants.W_OK);
         }
       }
+    } catch { throw storageError(); }
+    let assets;
+    try {
+      if (typeof this.assetsDir !== "string" || !isAbsolute(this.assetsDir)) throw new Error();
+      const pending = this.assetsPending ||= runtime.ensureAssets({ destination: this.assetsDir, assets: this.sourceAssets });
+      try { assets = await pending; }
+      finally { if (this.assetsPending === pending) this.assetsPending = undefined; }
+      if (typeof assets !== "string" || !isAbsolute(assets)) throw new Error();
+      readableFile(join(assets, "index.html"));
+    } catch {
+      throw new BridgeError("drawio_assets_unavailable", "Could not prepare the pinned browser draw.io assets. Check network access and private asset-cache read/write permissions, or correct explicit DRAWIO_ASSETS to a complete compatible local asset directory, then reopen the canvas. Desktop draw.io is optional and cannot replace browser assets.");
     }
-    child.kill("SIGTERM");
-    throw new BridgeError("drawio_start_failed", "Could not start this session's diagram bridge. Check Bun and the extension's local draw.io assets.");
+    if (this.stopping) throw stoppedError();
+    const previous = this.services.get(sessionId);
+    if (previous) {
+      await previous.close();
+      this.services.delete(sessionId);
+    }
+    let service;
+    try {
+      service = await runtime.startBridge({ filename, runtimeFile, assets, port: 0 });
+      if (typeof service?.close !== "function") throw new Error();
+      const config = readRuntime(runtimeFile);
+      if (config.url !== service.url) throw new Error();
+      await verifyDocument(config, filename);
+      this.services.set(sessionId, service);
+      return runtimeFile;
+    } catch (error) {
+      if (service?.close) await service.close();
+      if (error.code === "drawio_document_changed") throw error;
+      throw new BridgeError("drawio_start_failed", `Could not start this session's diagram bridge. Check private drawing storage access and repair the bundled runtime installation. ${repairInstallation}`);
+    }
   }
 
   stop() {
-    for (const child of this.children) child.kill("SIGTERM");
+    this.stopping = true;
+    return this.stopPending ||= (async () => {
+      await Promise.allSettled(this.sessions.values());
+      const services = [...this.services.values()];
+      this.services.clear();
+      await Promise.all(services.map(service => service.close()));
+    })();
   }
 }

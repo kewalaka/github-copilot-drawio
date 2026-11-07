@@ -36,9 +36,10 @@ export function buildShapeIndex(assets: string) {
           const viewBox = svg.match(/viewBox\s*=\s*["']\s*[-\d.e+]+\s+[-\d.e+]+\s+([\d.e+]+)\s+([\d.e+]+)\s*["']/i);
           const ratio = viewBox ? Number(viewBox[1]) / Number(viewBox[2]) : 1;
           if (!Number.isFinite(ratio) || ratio <= 0) continue;
-          const asset = '/drawio/' + path.split('/').map(encodeURIComponent).join('/');
+          const image = path.split('/').map(encodeURIComponent).join('/');
+          const asset = '/drawio/' + image;
           shapes.push({ id: path, label: entry.name.slice(0, -4).replaceAll('_', ' '), category: directory.slice('img/lib/'.length), asset,
-            style: `image;aspect=fixed;html=1;align=center;verticalLabelPosition=bottom;verticalAlign=top;image=${asset};`,
+            style: `image;aspect=fixed;html=1;align=center;verticalLabelPosition=bottom;verticalAlign=top;image=${image};`,
             width: Math.max(1, Math.round(64 * Math.min(ratio, 1) * 100) / 100), height: Math.max(1, Math.round(64 / Math.max(ratio, 1) * 100) / 100) });
         }
       }

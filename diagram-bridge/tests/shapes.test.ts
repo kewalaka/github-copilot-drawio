@@ -23,7 +23,7 @@ test('returns exact core styles and usable image styles/dimensions without remot
   const result = search({ query: 'example test service', limit: 1 });
   expect(result).toMatchObject({ editorVersion, indexed: 2, total: 1 });
   expect(result.shapes[0]).toMatchObject({ label: 'Test Service', asset: '/drawio/img/lib/example/Test_Service.svg', width: 64, height: 32 });
-  expect(result.shapes[0].style).toContain('image=/drawio/img/lib/example/Test_Service.svg;');
+  expect(result.shapes[0].style).toContain('image=img/lib/example/Test_Service.svg;');
   expect(search({ query: 'nonexistent' }).shapes).toEqual([]);
   expect(JSON.stringify(result)).not.toMatch(/https?:|icons\.diagrams\.net/);
 });
@@ -69,7 +69,12 @@ test('the actual pinned local editor supports all indexed image paths and litera
     expect(shape.width).toBeGreaterThan(0);
     expect(shape.height).toBeGreaterThan(0);
     expect(shape.style).not.toMatch(/https?:|javascript:|\/\//i);
-    if (shape.asset) expect(existsSync(join(directory, decodeURIComponent(shape.asset.slice('/drawio/'.length))))).toBe(true);
+    if (shape.asset) {
+      const image = shape.style.match(/(?:^|;)image=([^;]+);/)![1];
+      expect(image).not.toStartWith('/');
+      expect(shape.asset).toBe('/drawio/' + image);
+      expect(existsSync(join(directory, decodeURIComponent(image)))).toBe(true);
+    }
   }
   expect(createShapeSearch(directory)({ query: 'ai foundry' }).shapes[0].label).toBe('AI Foundry');
 });
@@ -86,6 +91,7 @@ test('the bundled skill is discoverable through SDK tool and session context, wi
   expect(result.textResultForLlm).toContain('Never blindly replay');
   expect(result.textResultForLlm).toContain('not necessarily `0` and `1`');
   expect(result.textResultForLlm).toContain('user-defined waypoints');
-  expect(result.textResultForLlm).not.toMatch(/Datacom|Azure|140.?60/);
-  expect((await options.hooks.onSessionStart()).additionalContext).toContain(tool.name);
+  expect(options.systemMessage.mode).toBe('append');
+  expect(options.systemMessage.content).toContain(tool.name);
+  expect(options.hooks).toBeUndefined();
 });

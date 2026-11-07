@@ -2,17 +2,24 @@ const frame = document.querySelector('#editor');
 const status = document.querySelector('#status');
 const saveButton = document.querySelector('#save');
 const busy = document.querySelector('#busy');
+const openButton = document.querySelector('#open-drawio');
+const resumeButton = document.querySelector('#resume');
 const editorId = sessionStorage.bridgeEditorId ||= crypto.randomUUID();
 let state;
+let editorLease;
 let ready = false;
 let chain = Promise.resolve();
 let pendingExport;
 let suppressAutosave = false;
 let stopped = false;
 let unsaved = false;
+let paused = false;
+let browserFallback = false;
+let pollGeneration = 0;
 
-async function api(path, body) {
+async function api(path, body, keepalive = false) {
   const response = await fetch('/api/' + path, {
+    keepalive,
     method: body === undefined ? 'GET' : 'POST',
     headers: { Authorization: `Bearer ${window.BRIDGE_TOKEN}`, 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify({ ...body, editorId }),
@@ -24,7 +31,21 @@ async function api(path, body) {
 function report(message, error = false) { status.textContent = message; status.classList.toggle('error', error); }
 function enqueue(action) { chain = chain.then(action).catch(error => report(error.message, true)); return chain; }
 function send(message) { frame.contentWindow.postMessage(JSON.stringify(message), location.origin); }
-function block(value) { busy.hidden = !value; frame.inert = value; saveButton.disabled = value || !ready; }
+function block(value) {
+  busy.hidden = !value && !paused;
+  busy.textContent = paused ? 'Canvas paused. Close the other editor, then choose Resume here.' : 'Saving diagram…';
+  frame.inert = value || paused;
+  saveButton.disabled = value || !ready || paused;
+  openButton.disabled = value || (paused ? !browserFallback : !ready);
+  resumeButton.hidden = !paused;
+  resumeButton.disabled = value || !paused;
+}
+function pause() {
+  paused = true; stopped = true; pollGeneration++;
+  sessionStorage.bridgePaused = '1';
+  block(false);
+}
+function openBrowser() { window.open(location.origin + '/', '_blank', 'noopener'); }
 function exportDiagram(format, xml) {
   if (pendingExport) return Promise.reject(new Error('An export is already pending'));
   return new Promise((resolve, reject) => {
@@ -79,13 +100,13 @@ window.addEventListener('message', event => {
   if (event.source !== frame.contentWindow || event.origin !== location.origin) return;
   let message;
   try { message = typeof event.data === 'string' ? JSON.parse(event.data) : event.data; } catch { return; }
-  if (!message) return;
+  if (!message || paused) return;
   if (message.event === 'configure') send({ action: 'configure', config: {
     defaultLibraries: 'general;azure2', preserveViewState: true, useInternalClipboard: true,
     suppressNewWindows: true, enableLibraries: true,
   } });
   if (message.event === 'init') {
-    ready = true; saveButton.disabled = false;
+    ready = true; block(false);
     send({ action: 'load', xml: state.xml, autosave: 1, title: 'Architecture', fit: 1 });
   }
   if (message.event === 'load' && !suppressAutosave) {
@@ -93,32 +114,78 @@ window.addEventListener('message', event => {
     if (state.dirty) enqueue(() => saveCurrent());
   }
   if (message.event === 'export' && pendingExport) pendingExport.resolve(message);
-  if (message.event === 'autosave' && !suppressAutosave) {
+  if (message.event === 'autosave' && ready && !suppressAutosave) {
     const xml = message.xml;
     unsaved = true;
     report('Saving manual edit…');
     enqueue(() => saveCurrent(xml));
   }
-  if (message.event === 'save') {
+  if (message.event === 'save' && ready) {
     unsaved = true;
     enqueue(() => saveCurrent(message.xml));
   }
 });
 saveButton.addEventListener('click', () => enqueue(() => saveCurrent()));
-window.addEventListener('beforeunload', event => {
-  if (unsaved || state?.dirty || !busy.hidden) { event.preventDefault(); event.returnValue = ''; }
+document.querySelector('#preview').addEventListener('click', () => window.open('/diagram.svg', '_blank', 'noopener'));
+openButton.addEventListener('click', () => {
+  if (browserFallback) { openBrowser(); return; }
+  block(true);
+  enqueue(async () => {
+    try {
+      await saveCurrent();
+      block(true);
+      state = await api('handoff', { expectedRevision: state.revision });
+      pause(); block(true);
+      const { opened } = await api('open-desktop', {});
+      if (opened) report('Opened in draw.io desktop. Close it before resuming here.');
+      else {
+        state = await api('browser-handoff', {});
+        browserFallback = true;
+        openButton.textContent = 'Open browser editor';
+        report('Canvas paused. Continue in the local browser editor; if no window opens, click Open browser editor.');
+        openBrowser();
+      }
+    } finally { block(false); }
+  });
 });
+resumeButton.addEventListener('click', () => {
+  block(true);
+  enqueue(async () => { try { await connect(true); } finally { block(false); } });
+});
+window.addEventListener('beforeunload', event => {
+  if (unsaved || state?.dirty || (!busy.hidden && !paused)) { event.preventDefault(); event.returnValue = ''; }
+});
+window.addEventListener('pagehide', () => {
+  stopped = true; ready = false; pollGeneration++;
+  if (editorLease) api('editor/release', { editorLease }, true).catch(() => {});
+});
+window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
 async function poll() {
-  while (!stopped) {
+  const generation = ++pollGeneration;
+  while (!stopped && generation === pollGeneration) {
     await new Promise(resolve => setTimeout(resolve, 800));
+    if (stopped || generation !== pollGeneration) return;
     try {
       const { job } = await api('jobs?editorId=' + encodeURIComponent(editorId));
+      if (stopped || generation !== pollGeneration) return;
       if (job && ready) await enqueue(() => runJob(job));
-    } catch (error) { report(error.message, true); stopped = true; }
+    } catch (error) {
+      if (generation === pollGeneration) { report(error.message, true); stopped = true; }
+    }
   }
 }
-api('editor', { editorId }).then(result => {
-  state = result;
+async function connect(resume = false) {
+  state = await api('editor', { resume });
+  editorLease = state.editorLease;
+  paused = false; browserFallback = false; stopped = false; ready = false;
+  delete sessionStorage.bridgePaused;
+  openButton.textContent = 'Open in Draw.io';
+  block(false);
   frame.src = '/drawio/index.html?embed=1&proto=json&configure=1&offline=1&local=1&stealth=1&ui=min&libraries=1&noExitBtn=1&lang=en';
   poll();
-}).catch(error => report(error.message, true));
+}
+connect().catch(async error => {
+  state = await api('document').catch(() => null);
+  if (state?.paused || sessionStorage.bridgePaused === '1') pause();
+  report(error.message, true);
+});

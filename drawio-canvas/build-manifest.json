@@ -1,0 +1,22 @@
+{
+  "format": 1,
+  "target": "node",
+  "dependency": "@xmldom/xmldom@0.9.12",
+  "runtimeSha256": "9cb0e4b75fd8632b709c5db114457eef7ae7d317d7be271205e4ab60795272b5",
+  "sources": {
+    "drawio-canvas/build.ts": "aec85aa1c4c5f81fcf8b2458163e4a1d8d97842faf010fc25599a67b299d5b24",
+    "drawio-canvas/runtime-entry.ts": "63ea2c4fc5036988aabfbbc799ca6542bb063dad57526860b6ee4525e0fe79cc",
+    "drawio-canvas/install-assets.ts": "c8181fcb1860b2c280eb3adbc2c98cf3b02ec50e58a0418e9029c2f9f8f66938",
+    "diagram-bridge/server.ts": "f976144ecc5c046701a5d21357f7b894b3cbc3c720dcd0fab2e4008fed67f53e",
+    "diagram-bridge/model.ts": "a2356859ebed09a5f722b6e352d34a39eef7d4c2ea77136267ed07833ee75de7",
+    "diagram-bridge/empty.ts": "48b5da3d46c4e1a49097b63cb887524cebb2028c2222b9760ed2132bc0f729be",
+    "diagram-bridge/shapes.ts": "f86e9cac7b1437ff8a6380ed471c5c3038c3780fee08b13f56aa8bc9189e12a6",
+    "diagram-bridge/desktop.ts": "6fb0f3b01149d1daa3e9fe630de0b575533839cee02d58cccfaa1b0d01ea75bf",
+    "diagram-bridge/public/index.html": "1e418a3ea9ca5863b960cf394e8b6bafb36735bea6db2a20375e8d42683a5c07",
+    "diagram-bridge/public/style.css": "574d073f46cd906a7978915c4dd65a4a73d995dba74521426dcc57ed2f8c625c",
+    "diagram-bridge/public/app.js": "2a07b3479fae5fafcad56b2fe629ad4bdba78ddb5520a4399382043db9e83a3d",
+    "diagram-bridge/package.json": "30e626a1c33da7b896c045b3ed7293ba973366f1a6ea3766237bf0755a344de4",
+    "diagram-bridge/bun.lock": "6ec9c6ae6822cf1ba32e0a172b3a800b1b90e10c61ce1ad4c92365e7288b68da",
+    "drawio-canvas/THIRD_PARTY_NOTICES.txt": "fb7f9f4e28a402c63fbbc093884620bb8978a999d34355dd2dffedaacd4b9c1d"
+  }
+}
